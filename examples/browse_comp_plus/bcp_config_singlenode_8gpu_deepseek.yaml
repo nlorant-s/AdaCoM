@@ -1,0 +1,155 @@
+# Single-node 8-GPU BCP training config.
+# Agent: external DeepSeek-V3 (API). Context Manager (RL-trained): local Qwen3-4B.
+# Retriever: dense embedding index (Qwen3-Embedding-8B).
+project: "bcp_paper"
+group: "single_node_8gpu"
+name: "a_deepseek_m_qwen3-4B_e_qwen"
+dataset: browsecomp_plus
+checkpoint_root_dir: ${oc.env:CHECKPOINT_ROOT_DIR,./checkpoints}
+continue_from_checkpoint: true
+
+algorithm:
+  algorithm_type: multi_step_grpo
+  repeat_times: 8                       # GRPO rollouts per sample
+  advantage_fn_args:
+    std_threshold: 0.001
+    alpha_task_score: 1.0               # LLM-judge final-answer score weight
+    alpha_inter_reward: 0.1             # Per-step intermediate reward weight
+    epsilon: 1e-8
+  kl_loss_fn_args:
+    kl_coef: 0.006
+  sample_strategy_args:
+    max_staleness: 10
+  optimizer:
+    lr: 5e-6
+
+model:
+  # Context Manager (trained via RL). Point at your SFT checkpoint or Qwen3-4B-Instruct base.
+  model_path: ${oc.env:MODEL_PATH,./checkpoints/bcp_sft_5_epoch}
+  max_response_tokens: 4096
+  max_model_len: 32768
+
+cluster:
+  node_num: 1
+  gpu_per_node: 8
+
+buffer:
+  total_epochs: 25
+  batch_size: 32
+  train_batch_size: 768
+
+  explorer_input:
+    taskset:
+      name: browsecomp_train
+      storage_type: file
+      path: data/browsecomp_plus
+      split: train
+      task_selector:
+        selector_type: shuffle
+      format:
+        prompt_key: 'query'
+        response_key: 'answer'
+        task_id_key: 'query_id'
+      workflow_args: &default_workflow_args
+        max_iterations: 35
+        stop_on_no_tool_use: True
+        searcher_type: "dense"
+        dataset: ${dataset}
+        project: ${project}
+        group: ${group}
+        name: ${name}
+        # BROWSECOMP_PATH must point at the BrowseComp-Plus root (contains indexes/, docs/, ...).
+        index_path: ${oc.env:BROWSECOMP_PATH,""}/indexes/qwen3-embedding-8b
+        browsecomp_path: ${oc.env:BROWSECOMP_PATH,null}
+        agent_model_source: external
+        agent_model_name: deepseek-v3
+        agent_enable_thinking: false
+        tokenizer_model: ${oc.env:TOKENIZER_MODEL,./models/Qwen3-4B-Instruct-2507}
+        memory_model: Qwen3-4B
+        memory_config:
+          use_bg_info: true
+          chat_tokenizer_model: ${oc.env:TOKENIZER_MODEL,./models/Qwen3-4B-Instruct-2507}
+          max_model_len: ${model.max_model_len}
+          max_response_tokens: ${model.max_response_tokens}
+        reward_config: &default_reward_config
+          parsing_failure_penalty: -0.5
+          out_of_tokens_penalty: -0.8
+          duplicate_call_penalty: -0.4
+          enable_compression_doc_reward: false
+          enable_search_hit_reward: true
+          search_hit_gold_positive: 0.6
+          search_hit_key_positive: 0.3
+      rollout_args: &default_rollout_args
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 4096
+
+    eval_tasksets:
+    - name: browsecomp_eval
+      storage_type: file
+      path: data/browsecomp_plus
+      split: test
+      repeat_times: 3
+      format:
+        prompt_key: 'query'
+        response_key: 'answer'
+        task_id_key: 'query_id'
+      workflow_args:
+        <<: *default_workflow_args
+        max_iterations: 50
+        reward_config:
+          <<: *default_reward_config
+      rollout_args:
+        <<: *default_rollout_args
+        temperature: 0.0
+
+    default_workflow_type: 'bcp_simple_react_workflow'
+
+  trainer_input:
+    experience_buffer:
+      name: experience_buffer
+      storage_type: queue
+      max_read_timeout: 198000
+      replay_buffer:
+        enable: true
+
+explorer:
+  eval_interval: 2
+  max_repeat_times_per_runner: 1
+  max_timeout: 3600
+  runner_per_model: 16
+  eval_on_startup: false
+  rollout_model:
+    enable_history: true
+    enable_thinking: false
+    enable_openai_api: true
+    enable_auto_tool_choice: false
+    engine_num: 4                       # 4 rollout engines, 4 trainer GPUs => 8 GPUs total
+    tensor_parallel_size: 1
+    enable_prefix_caching: true
+    enforce_eager: false
+    dtype: bfloat16
+    seed: 42
+    gpu_memory_utilization: 0.7
+    enable_chunked_prefill: true
+    tool_call_parser: null
+    reasoning_parser: null
+
+synchronizer:
+  sync_style: dynamic_by_explorer
+  sync_method: 'nccl'
+  sync_interval: 2
+  sync_timeout: 7200
+
+trainer:
+  save_interval: 1
+  grad_clip: 1.0
+  use_dynamic_bsz: true
+  max_token_len_per_gpu: 16384
+  ulysses_sequence_parallel_size: 4
+  save_satisfied_interval: 1
+  save_on_metric: "eval/browsecomp_eval/score/mean@3/mean"
+  save_on_metric_threshold: 0.33
+
+monitor:
+  monitor_type: wandb

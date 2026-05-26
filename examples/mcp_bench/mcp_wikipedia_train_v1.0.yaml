@@ -1,0 +1,155 @@
+project: "ly_mcp"
+group: "v1.0_mcp"
+dataset: "mcp"
+name: "a_qwen3-max_m_qwen3-4B_e_mcp/mcp/v1.0"
+checkpoint_root_dir: ${oc.env:CHECKPOINT_ROOT_DIR,./checkpoints}
+continue_from_checkpoint: true
+algorithm:
+  algorithm_type: multi_step_grpo
+  repeat_times: 8 # Number of rollouts per sample for GRPO
+  advantage_fn_args:
+    std_threshold: 0.001
+    alpha_task_score: 1.0   # LLM judge evaluates task completion quality
+    alpha_inter_reward: 0.1
+    epsilon: 1e-8
+  kl_loss_fn_args:
+    kl_coef: 0.01
+  entropy_loss_fn_args:
+    entropy_coef: 0.001
+  optimizer:
+    lr: 5e-6
+
+model:
+  model_path: TODO_sft
+  max_response_tokens: 4096
+  max_model_len: 32768
+
+cluster:
+  node_num: 2
+  gpu_per_node: 8
+
+buffer:
+  total_epochs: 25
+  batch_size: 64
+  train_batch_size: 640 
+
+  explorer_input:
+    # Training dataset
+    taskset:
+      name: mcp
+      storage_type: file
+      path: data/mcp_bench
+      split: train
+      task_selector:
+        selector_type: shuffle
+      format:
+        prompt_key: 'task_description'
+        response_key: 'answer'
+        task_id_key: 'task_id'
+      workflow_args: &default_workflow_args
+        max_iterations: 40
+        stop_on_no_tool_use: True
+        dataset: mcp
+        project: ${project}
+        group: ${group}
+        name: ${name}
+        agent_model_source: external
+        agent_model_name: qwen3-max
+        judge_model_name: gpt-5-2025-08-07
+        memory_model: Qwen3-4B
+        calculate_reward: true
+        force_eval_create_logger: true
+        # MCP server configs — Wikipedia only needs name for tool routing
+        mcp_server_configs:
+          - name: Wikipedia
+        # Offline tool schemas — no MCP server process needed at init
+        # 有 tool_schemas_path 时从 JSON 加载工具 schema，不启动 MCP server 进程
+        tool_schemas_path: data/mcp_bench/mcp_tool_schemas.json
+        # Three-layer caching: L1 tool_cache (μs) → L2 ES (ms) → L3 miss_log (async backfill)
+        tool_cache_path: ${oc.env:MCP_TOOL_CACHE_PATH,./caches/mcp_tool_cache.json}
+        es_fallback:
+          enabled: true
+          es_url: http://localhost:9200
+          es_index: wikipedia_en
+          miss_log_path: ${oc.env:MCP_MISS_LOG_PATH,./caches/mcp_miss_log.jsonl}
+        skip_live_mcp_servers:
+          - Wikipedia  # Training mode: cache + ES only, no live Wikipedia API calls
+        memory_config:
+          use_bg_info: true
+          chat_tokenizer_model: ${oc.env:TOKENIZER_MODEL,./models/Qwen3-4B-Instruct-2507}
+          max_model_len: 32768
+      rollout_args: &default_rollout_args
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 4096
+
+    # Evaluation datasets
+    eval_tasksets:
+    - name: mcp
+      storage_type: file
+      path: data/mcp_bench
+      split: test
+      repeat_times: 3
+      format:
+        prompt_key: 'task_description'
+        response_key: 'answer'
+        task_id_key: 'task_id'
+      workflow_args:
+        <<: *default_workflow_args
+      rollout_args:
+        <<: *default_rollout_args
+        temperature: 0.0
+
+    default_workflow_type: 'mcp_bench_workflow'
+
+  trainer_input:
+    experience_buffer:
+      name: experience_buffer
+      storage_type: queue
+      max_read_timeout: 198000
+      replay_buffer:
+        enable: true
+
+explorer:
+  max_repeat_times_per_runner: 1
+  max_timeout: 7200  # 2 hours — tasks are complex with many tool calls
+  runner_per_model: 10  # Fewer runners — each task takes longer
+  eval_on_startup: false
+  over_rollout:
+    ratio: 0.2
+    wait_after_min: 120  # Wait 2min after min threshold — tasks are slow
+  eval_interval: 2
+  rollout_model:
+    enable_thinking: false
+    enable_history: true
+    enable_openai_api: true
+    enable_auto_tool_choice: false
+    engine_num: 12
+    tensor_parallel_size: 1
+    enable_prefix_caching: false
+    enforce_eager: true
+    dtype: bfloat16
+    seed: 42
+    gpu_memory_utilization: 0.7
+    enable_chunked_prefill: true
+    tool_call_parser: null
+    reasoning_parser: null
+
+synchronizer:
+  sync_style: dynamic_by_explorer
+  sync_method: 'nccl'
+  sync_interval: 2
+  sync_timeout: 7200
+
+trainer:
+  save_interval: 1
+  grad_clip: 1.0
+  use_dynamic_bsz: true
+  max_token_len_per_gpu: 16384
+  ulysses_sequence_parallel_size: 4
+  # LLM judge (gpt-5) evaluates task completion quality as final score.
+  save_on_metric: "eval/mcp/score/mean@3/mean"
+  save_on_metric_threshold: 0.05
+  save_only_on_passing_eval: true
+monitor:
+  monitor_type: wandb
