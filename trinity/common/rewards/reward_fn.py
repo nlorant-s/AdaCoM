@@ -24,9 +24,7 @@ class RewardFn(ABC):
 
 @REWARD_FUNCTIONS.register_module("rm_gallery_reward")
 class RMGalleryFn(RewardFn):
-    """Reward Function from RMGallery.
-    https://github.com/modelscope/RM-Gallery
-    """
+    """Reward Function from RMGallery."""
 
     def __init__(
         self,
@@ -49,9 +47,7 @@ class RMGalleryFn(RewardFn):
     def _build_sample_from_experience(
         self, experience: Experience, messages: List[Dict[str, Any]], **kwargs
     ) -> Any:
-        """Convert experience to sample.
-        Ref: https://github.com/modelscope/RM-Gallery/blob/main/rm_gallery/core/data/schema.py
-        """
+        """Convert experience to sample."""
         from rm_gallery.core.data.schema import DataOutput, DataSample, Step
 
         output = [

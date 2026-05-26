@@ -26,7 +26,7 @@ Dependencies:
             pip install reme-ai
 
     Python 3.12 or greater is required to use ReMe.
-    For more information, visit: https://github.com/modelscope/reMe
+    For more information, visit the ReMe project page.
 
 Subclasses:
     This base class is extended by specific memory type implementations:
@@ -274,7 +274,7 @@ class ReMeLongTermMemoryBase(LongTermMemoryBase, metaclass=ABCMeta):
             raise ImportError(
                 "The 'reme_ai' library is required for ReMe-based "
                 "long-term memory. Please install it by `pip install reme-ai`,"
-                "and visit: https://github.com/modelscope/reMe for more "
+                "and visit the ReMe project page for more"
                 "information.",
             ) from e
 

@@ -4,9 +4,7 @@ name = "agentscope"
 dynamic = ["version"]
 description = "AgentScope: A Flexible yet Robust Multi-Agent Platform."
 readme = "README.md"
-authors = [
-    { name = "AgentScope Contributors" }
-]
+authors = []
 license = "Apache-2.0"
 keywords = ["deep-learning", "multi agents", "agents"]
 classifiers = [
@@ -74,9 +72,6 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/agentscope-ai/agentscope"
-Documentation = "https://doc.agentscope.io/"
-Repository = "https://github.com/agentscope-ai/agentscope"
 
 [tool.setuptools]
 packages = { find = { where = ["src", "."], exclude = ["tests*", "examples*", "docs*", "benchmark_results*", "assets*"] } }

@@ -205,7 +205,7 @@ def repair_unescaped_inner_quotes(s: str) -> str:
             i += 1
             continue
 
-        # 在字符串内部
+        # Inside string
         if escape:
             # Current character is escaped (including \", \\, \n, \u, etc.), keep as is
             out.append(ch)

@@ -776,7 +776,7 @@ class BCPSimpleToolReActWorkflow(Workflow):
                  logger.error(f"Worker Traceback: {result.get('traceback')}")
             # Keep answer as None or set to empty string depending on downstream needs.
             # User asked to KEEP error (implying keep None? or just log error?)
-            # "不要修改，保留报错" -> likely means don't hide the fact it failed.
+            # Keep the error visible, don't hide the fact it failed.
             # But we must avoid the crash.
             answer = "" # Still need a string for subsequent operations like judging?
             # If answer is None, Judge will likely fail or score 0.

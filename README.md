@@ -2,8 +2,7 @@
 
 Paper code release. Trains a **Context Manager** — a small LLM that compresses an
 agent's running chat history so long-horizon tool-use trajectories stay within the
-context window — via RL on top of the [Trinity-RFT](https://github.com/modelscope/Trinity-RFT)
-framework.
+context window — via RL on top of the Trinity-RFT framework.
 
 Two task-solving agents drive rollouts:
 
