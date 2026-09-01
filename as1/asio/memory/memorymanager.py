@@ -46,6 +46,10 @@ from .utils import (
 )
 from ..utils.retry import retry_model_call
 import json_repair
+from .context_lock import (
+    filter_modifications, format_msgs_with_locks, plan_lineage,
+    stamp_produced_uids, snapshot, records_to_json, LOCK_PROMPT_ADDENDUM,
+)
 
 # Custom exception for memory parsing errors
 class MemoryError(Exception):
@@ -460,6 +464,12 @@ class MemoryManager():
         self.max_model_len = params.get("max_model_len", 32768)
         # Compression frequency: compress_fre for fixed interval, or compress_fre_min/max for random range
         self.compress_fre = params.get("compress_fre", None)
+        # --- context lock / lineage (thinking-enabled agents) ---
+        self.agent_thinking_enabled = bool(params.get("agent_thinking_enabled", False))
+        self.lock_violation_penalty = params.get("lock_violation_penalty", None)  # None => silent drop
+        self.lineage_log_path = params.get("lineage_log_path", None)
+        self.lock_violations_last = []
+        self.lineage_records = []
         self.compress_fre_min = params.get("compress_fre_min", None)
         self.compress_fre_max = params.get("compress_fre_max", None)
         self.max_response_tokens = params.get("max_response_tokens", 4096)
@@ -804,8 +814,16 @@ class MemoryManager():
             - modifications: list (only if status == "ok")
             - modification_response_text: str (only if status == "ok")
         """
-        prompt_step_2 = self.manager_step_2_prompt.replace(
-            "{{full_memory}}", format_msgs(self._chat_history, strip_content_ids=True)
+        _serialized = (
+            format_msgs_with_locks(self._chat_history, thinking_enabled=True, strip_content_ids=True)
+            if self.agent_thinking_enabled
+            else format_msgs(self._chat_history, strip_content_ids=True)
+        )
+        _prompt_tmpl = self.manager_step_2_prompt
+        if self.agent_thinking_enabled and "### Locked Messages" not in _prompt_tmpl:
+            _prompt_tmpl = _prompt_tmpl.replace("## Your Input", LOCK_PROMPT_ADDENDUM + "\n## Your Input", 1)
+        prompt_step_2 = _prompt_tmpl.replace(
+            "{{full_memory}}", _serialized
         ).replace(
             "{{token_usage_ratio}}", token_usage_ratio
         ).replace(
@@ -900,7 +918,23 @@ class MemoryManager():
         """
         try:
             modifications = results.get("modifications", [])
-            
+
+            # --- lock enforcement (thinking-enabled agent) ---
+            if self.agent_thinking_enabled:
+                modifications, self.lock_violations_last = filter_modifications(
+                    modifications, self._chat_history, thinking_enabled=True
+                )
+                results["modifications"] = modifications
+                results["lock_violations"] = [v.__dict__ for v in self.lock_violations_last]
+                if self.lock_violations_last and self.experiment_logger:
+                    self.experiment_logger.log_warning(
+                        f"MEMORY_LOCK: dropped {len(self.lock_violations_last)} op(s): {results['lock_violations']}"
+                    )
+            # --- lineage: snapshot before, plan uids ---
+            _before_history = list(self._chat_history)
+            _pre_snapshot = snapshot(_before_history)
+            _lineage_recs, _produced = plan_lineage(modifications, _before_history, step=self.round_number)
+
             delete_list = []
             for r in modifications:
                 ids = r["ids"]
@@ -1089,6 +1123,25 @@ class MemoryManager():
                 self._save_debug_history(self._chat_history, hint=f"Round {self.round_number} Modifications applied:\n{json.dumps(modifications, indent=2, ensure_ascii=False)}\n")
             else:
                 self._save_debug_history([], hint=f"No modifications applied")
+
+            # --- lineage: stamp produced uids, persist ---
+            stamp_produced_uids(self._chat_history, _before_history, _produced)
+            self.lineage_records.extend(_lineage_recs)
+            results["lineage"] = records_to_json(_lineage_recs)
+            if self.lineage_log_path:
+                try:
+                    with open(self.lineage_log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps({
+                            "round": self.round_number,
+                            "pre": _pre_snapshot,
+                            "post": snapshot(self._chat_history),
+                            "modifications": modifications,
+                            "lock_violations": results.get("lock_violations", []),
+                            "lineage": results["lineage"],
+                        }, ensure_ascii=False) + "\n")
+                except Exception as _e:
+                    if self.experiment_logger:
+                        self.experiment_logger.log_warning(f"LINEAGE_LOG failed: {_e}")
 
             # Only set last_results on successful completion
             self.last_results = results
