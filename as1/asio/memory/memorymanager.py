@@ -365,19 +365,25 @@ class MemoryManager():
                 if self.experiment_logger:
                     self.experiment_logger.log_info(f"Normalized tokenizer path: {tokenizer_path}")
 
-        # Try AutoTokenizer first (local path or HF repo ID), fallback to tiktoken
-        try:
-            self.chat_tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_path, trust_remote_code=True, use_fast=False
-            )
-        except Exception as e:
+        # An already-constructed tokenizer may be injected (tests, or a
+        # tokenizer shared across workers); skip loading entirely then.
+        injected_tokenizer = params.get("chat_tokenizer", None)
+        if injected_tokenizer is not None:
+            self.chat_tokenizer = injected_tokenizer
+        else:
+            # Try AutoTokenizer first (local path or HF repo ID), fallback to tiktoken
             try:
-                self.chat_tokenizer = tiktoken.get_encoding(chat_tokenizer_model)
-            except Exception as e2:
-                raise ValueError(
-                    f"Failed to load tokenizer '{chat_tokenizer_model}'. "
-                    f"AutoTokenizer error: {e}. tiktoken error: {e2}"
+                self.chat_tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_path, trust_remote_code=True, use_fast=False
                 )
+            except Exception as e:
+                try:
+                    self.chat_tokenizer = tiktoken.get_encoding(chat_tokenizer_model)
+                except Exception as e2:
+                    raise ValueError(
+                        f"Failed to load tokenizer '{chat_tokenizer_model}'. "
+                        f"AutoTokenizer error: {e}. tiktoken error: {e2}"
+                    )
 
         prompts_module = importlib.import_module(".config.prompts", package=__name__.rsplit(".", 1)[0])
         self.update_memory_prompt = getattr(

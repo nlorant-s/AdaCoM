@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
@@ -346,3 +347,69 @@ def snapshot(chat_history: Sequence[Any]) -> List[dict]:
 
 def records_to_json(records: List[LineageRecord]) -> List[dict]:
     return [asdict(r) for r in records]
+
+
+# ----------------------------------------------------------------------------
+# Config threading (used by the Trinity workflows)
+# ----------------------------------------------------------------------------
+def apply_thinking_memory_config(
+    memory_config: Optional[Dict[str, Any]],
+    agent_thinking_enabled: bool,
+) -> Dict[str, Any]:
+    """Thread the agent's thinking flag into the manager's config.
+
+    The manager needs to know whether the frozen agent runs with extended
+    thinking: that is what turns on the lock (prompt annotation + apply-side
+    filtering). Returns the same dict (mutated in place) for convenience.
+    """
+    cfg = memory_config if memory_config is not None else {}
+    cfg["agent_thinking_enabled"] = bool(agent_thinking_enabled)
+    return cfg
+
+
+def resolve_lineage_log_path(
+    memory_config: Optional[Dict[str, Any]],
+    run_dir: Optional[str] = None,
+    task_id: Any = None,
+    run_id: Any = None,
+    create_parent: bool = True,
+) -> Optional[str]:
+    """Work out where this rollout's lineage JSONL goes, or ``None`` if off.
+
+    Precedence:
+
+    1. ``memory_config["lineage_log_path"]`` — an explicit file path, used
+       verbatim (single-rollout debugging).
+    2. ``memory_config["lineage_log_dir"]`` — a run-independent base dir; the
+       file is ``<dir>/task_<task_id>/run_<run_id>.jsonl``. One file per
+       rollout, because G rollouts of the same task append concurrently.
+    3. ``run_dir`` — the ExperimentLogger's per-task debug dir, when one was
+       created for this rollout: ``<run_dir>/lineage.jsonl``.
+
+    Setting ``memory_config["lineage_logging"] = False`` disables all of it.
+    """
+    cfg = memory_config or {}
+    if cfg.get("lineage_logging", True) is False:
+        return None
+
+    explicit = cfg.get("lineage_log_path")
+    if explicit:
+        path = str(explicit)
+    else:
+        base_dir = cfg.get("lineage_log_dir")
+        if base_dir:
+            run_part = f"run_{run_id}" if run_id is not None else uuid.uuid4().hex[:8]
+            path = os.path.join(str(base_dir), f"task_{task_id}", f"{run_part}.jsonl")
+        elif run_dir:
+            path = os.path.join(str(run_dir), "lineage.jsonl")
+        else:
+            return None
+
+    if create_parent:
+        parent = os.path.dirname(path)
+        if parent:
+            try:
+                os.makedirs(parent, exist_ok=True)
+            except OSError:
+                return None
+    return path

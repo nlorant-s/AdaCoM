@@ -38,6 +38,10 @@ from asio.agent.bcp_worker import BCPWorker
 from asio.logger import ExperimentLogger
 from asio.utils.judge import judge_result
 from asio.memory.memorymanager import MemoryError
+from asio.memory.context_lock import (
+    apply_thinking_memory_config,
+    resolve_lineage_log_path,
+)
 import uuid
 
 def _is_anthropic_model(model_name: str) -> bool:
@@ -441,6 +445,10 @@ class BCPSimpleToolReActWorkflow(Workflow):
         self.memory_config = dict(memory_config_raw) if memory_config_raw else {}
         if self.tokenizer_model and "chat_tokenizer_model" not in self.memory_config:
             self.memory_config["chat_tokenizer_model"] = self.tokenizer_model
+        # The manager must know whether the frozen agent runs with extended
+        # thinking: that flag turns on the context lock (prompt annotation +
+        # apply-side filtering of ops targeting the in-flight tool-use cycle).
+        apply_thinking_memory_config(self.memory_config, self.agent_enable_thinking)
 
         # Judge & reward config
         self.judge_model_source = workflow_args.get("judge_model_source", "external")
@@ -719,6 +727,7 @@ class BCPSimpleToolReActWorkflow(Workflow):
         logger.info(f"BCPWorker creation took {timing_info['worker_creation']:.2f} seconds")
         
         # Start logging run if available
+        run_dir = None
         if experiment_logger:
             run_dir = experiment_logger.start_run(str(self.task_id), clear_existing=True)
             logger.debug(f"Started ExperimentLogger for task {self.task_id}, dir: {run_dir}")
@@ -726,6 +735,18 @@ class BCPSimpleToolReActWorkflow(Workflow):
             # Update memory debug_dir if applicable
             if hasattr(worker, 'memory') and hasattr(worker.memory, 'debug_dir'):
                 worker.memory.debug_dir = str(run_dir)
+
+        # Per-step lineage + pre/post context snapshots (drift analysis).
+        if hasattr(worker, 'memory') and hasattr(worker.memory, 'lineage_log_path'):
+            lineage_path = resolve_lineage_log_path(
+                self.memory_config,
+                run_dir=run_dir,
+                task_id=self.task_id,
+                run_id=getattr(self, 'current_run_id', None),
+            )
+            if lineage_path:
+                worker.memory.lineage_log_path = lineage_path
+                logger.debug(f"Lineage log for task {self.task_id}: {lineage_path}")
         
         # Phase 4: Run the actual task
         task_execution_start = time.time()
