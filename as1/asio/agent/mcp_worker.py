@@ -25,6 +25,7 @@ from agentscope.formatter import FormatterBase
 from agentscope.tool import Toolkit, ToolResponse
 from agentscope.memory import MemoryBase
 from agentscope.message import Msg, TextBlock, ToolUseBlock, ToolResultBlock
+from asio.agent.background_info import MCP_BACKGROUND_INFO, resolve_background_info
 from asio.logger import ExperimentLogger
 from asio.utils.retry import (
     retry_model_call, detect_model_provider, get_thinking_kwargs,
@@ -61,16 +62,9 @@ NOTE:
 """
 
 
-Background_info = """
-## Task Background
-
-The agent is responsible for executing complex tasks by leveraging tools across multiple MCP servers.
-
-**Information Retention Strategy:**  
-Retain information at a level of detail appropriate to the task at hand.  
-- If the task requires generating structured output (e.g., reports, summaries), preserve comprehensive details.  
-- Otherwise, retain only key findings and critical clues necessary to complete the task.
-"""
+# Kept as a module-level name for compatibility; the variants (and the
+# Anthropic tool-use one) live in asio.agent.background_info.
+Background_info = MCP_BACKGROUND_INFO
 
 
 class ToolResultCache:
@@ -361,7 +355,9 @@ class MCPWorker(ReActAgent):
                 MemoryManager = getattr(memory_module, "MemoryManager")
 
                 if memory_config and memory_config.get("use_bg_info"):
-                    memory_config["background_info"] = Background_info
+                    memory_config["background_info"] = resolve_background_info(
+                        memory_config, default_key="mcp"
+                    )
                 if memory_config and memory_config.get("use_trinity_model") and "_trinity_model" in memory_config:
                     trinity_model = memory_config["_trinity_model"]
                     trinity_formatter = memory_config["_trinity_formatter"]

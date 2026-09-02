@@ -28,6 +28,7 @@ from asio.utils.retry import (
 )
 from collections import defaultdict
 from asio.memory.utils import format_msgs
+from asio.agent.background_info import BCP_BACKGROUND_INFO, resolve_background_info
 from asio.agent.memory_reward_utils import (
     build_deferred_out_of_tokens_rewards,
     build_insufficient_budget_reward,
@@ -80,19 +81,9 @@ NOTE:
 """
 
 
-Background_info = """
-## Task Background Information
-
-Agent Mission: The agent is tasked with answering complex questions by iteratively searching a database for essential clues and evidence.
-
-Operational Workflow & Tools:
-
-search: Takes a query and returns a list of document snippets.
-
-get_document: Takes a specific document ID and retrieves the full-text content.
-
-Core Requirement (Data Traceability): Each document is identified by a unique ID. To ensure the agent can provide verifiable citations and maintain information provenance, it is critical to preserve the document IDs associated with important information.
-"""
+# Kept as a module-level name for compatibility; the variants (and the
+# Anthropic tool-use one) live in asio.agent.background_info.
+Background_info = BCP_BACKGROUND_INFO
 
 
 def get_model_call_kwargs(model, enable_thinking: bool = True, temperature: float = 0,
@@ -657,7 +648,9 @@ class BCPWorker(ReActAgent):
                 MemoryManager = getattr(memory_module, "MemoryManager")
                 
                 if memory_config and memory_config.get("use_bg_info"):
-                    memory_config["background_info"] = Background_info
+                    memory_config["background_info"] = resolve_background_info(
+                        memory_config, default_key="bcp"
+                    )
                 if memory_config and memory_config.get("use_trinity_model") and "_trinity_model" in memory_config:
                     # Use Trinity model for training
                     trinity_model = memory_config["_trinity_model"]
