@@ -209,7 +209,7 @@ class BCPWorker(ReActAgent):
         self.tokenizer_model = tokenizer_model or os.environ.get("DEFAULT_TOKENIZER_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
         self.tokenizer = tokenizer  # Pre-loaded tokenizer (skip loading in _init_searcher if set)
         self.enable_thinking = enable_thinking
-        # Provider-specific thinking parameters (budget_tokens / effort); see
+        # Provider-specific thinking parameters (effort); see
         # asio.utils.retry.get_anthropic_thinking_kwargs.
         self.thinking_config = thinking_config or {}
         self.agent_temperature = agent_temperature

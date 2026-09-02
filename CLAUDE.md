@@ -9,7 +9,10 @@ API agent** between steps. Only the manager is trained (multi-step GRPO). Paper:
 
 Our deltas from upstream:
 - Frozen agent = Claude via the **direct Anthropic Messages API** (`as1/src/agentscope/model/_anthropic_model.py`),
-  **extended thinking ON**. Dev on `claude-haiku-4-5`, experiments on `claude-sonnet-5`.
+  **adaptive thinking ON**, on `claude-sonnet-5` for both dev and experiments — dev must exercise the
+  request shape the experiments send. `claude-haiku-4-5` is available as a cheap harness agent with
+  thinking **off** only; it predates adaptive thinking and this fork does not send the deprecated
+  `budget_tokens` shape. See `docs/anthropic_api_notes.md`.
 - The manager may **never modify the latest assistant message** (in-flight thinking block + tool_use);
   its paired tool_result is **rewrite-only**. Implemented in `as1/asio/memory/context_lock.py`,
   wired into `memorymanager.py` (`call_modify`, `perform_modifications`). Tests: `as1/tests/test_context_lock.py`.

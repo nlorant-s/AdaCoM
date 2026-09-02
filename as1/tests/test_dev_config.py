@@ -8,8 +8,8 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
-CONFIG = os.path.join(REPO, "examples", "dev", "haiku_untrained_1gpu.yaml")
-SBATCH = os.path.join(REPO, "examples", "dev", "haiku_untrained_1gpu.sbatch")
+CONFIG = os.path.join(REPO, "examples", "dev", "sonnet5_untrained_1gpu.yaml")
+SBATCH = os.path.join(REPO, "examples", "dev", "sonnet5_untrained_1gpu.sbatch")
 
 sys.path.insert(0, os.path.join(REPO, "as1"))
 
@@ -30,7 +30,7 @@ def test_config_exists_and_parses():
     assert os.path.exists(CONFIG)
     cfg = _load()
     if cfg is None:
-        assert "agent_model_name: claude-haiku-4-5" in open(CONFIG).read()
+        assert "agent_model_name: claude-sonnet-5" in open(CONFIG).read()
         return
     assert cfg["mode"] == "bench"                      # untrained manager
     assert cfg["cluster"] == {"node_num": 1, "gpu_per_node": 1}
@@ -38,33 +38,36 @@ def test_config_exists_and_parses():
     assert cfg["buffer"]["batch_size"] == 5            # 5 dev tasks
 
 
-def test_agent_is_haiku_with_thinking_on():
+def test_agent_is_sonnet5_with_thinking_on():
     cfg = _load()
     if cfg is None:
         return
     wa = _workflow_args(cfg)
-    assert wa["agent_model_name"] == "claude-haiku-4-5"
+    # Dev runs the same model and the same request shape as the experiments.
+    assert wa["agent_model_name"] == "claude-sonnet-5"
     assert wa["agent_enable_thinking"] is True
     assert wa["agent_base_url"] is None                # direct Anthropic, not DashScope
     assert wa["max_iterations"] == 15
 
 
-def test_thinking_budget_is_valid_for_haiku():
+def test_thinking_config_produces_the_adaptive_request_shape():
     cfg = _load()
     if cfg is None:
         return
     wa = _workflow_args(cfg)
-    from asio.utils.retry import (MIN_THINKING_BUDGET_TOKENS,
-                                  classify_anthropic_thinking_mode,
-                                  get_anthropic_thinking_kwargs)
+    from asio.utils.retry import (ANTHROPIC_EFFORT_LEVELS,
+                                  get_anthropic_thinking_kwargs,
+                                  supports_adaptive_thinking)
 
     tc = wa["agent_thinking_config"]
-    assert classify_anthropic_thinking_mode(wa["agent_model_name"]) == "budget"
-    assert tc["budget_tokens"] >= MIN_THINKING_BUDGET_TOKENS
-    # Must leave room for the response, or the API 400s.
-    assert tc["budget_tokens"] < wa["agent_max_tokens"]
+    assert supports_adaptive_thinking(wa["agent_model_name"])
+    assert tc["effort"] in ANTHROPIC_EFFORT_LEVELS
+    assert "budget_tokens" not in tc          # never sent by this fork
     kwargs = get_anthropic_thinking_kwargs(wa["agent_model_name"], True, tc)
-    assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": tc["budget_tokens"]}
+    assert kwargs == {"thinking": {"type": "adaptive"},
+                      "output_config": {"effort": tc["effort"]}}
+    # max_tokens is the hard ceiling on thinking + response.
+    assert wa["agent_max_tokens"] >= 4096
 
 
 def test_lineage_and_cost_guard_are_on():

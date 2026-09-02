@@ -4,7 +4,7 @@
 # guard's spend log and the lineage JSONL are written as the run goes, so a
 # preempted run still leaves usable data behind.
 #
-#   sbatch examples/dev/haiku_untrained_1gpu.sbatch
+#   sbatch examples/dev/sonnet5_untrained_1gpu.sbatch
 #
 #SBATCH -J adacom-dev
 #SBATCH -p gpu-preempt
@@ -41,7 +41,7 @@ mkdir -p "$ADACOM_RUN_DIR/lineage" "$ADACOM_RUN_DIR/cost" logs
 nvidia-smi
 echo "run dir: $ADACOM_RUN_DIR"
 
-srun trinity run --config examples/dev/haiku_untrained_1gpu.yaml
+srun trinity run --config examples/dev/sonnet5_untrained_1gpu.yaml
 
 # What to look at afterwards:
 #   $ADACOM_RUN_DIR/lineage/task_*/run_*.jsonl   per-step pre/post context + lineage

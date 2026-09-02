@@ -4,25 +4,43 @@ Checked 2026-09-02 against `platform.claude.com/docs/en/build-with-claude/`
 (`docs.claude.com` 302s there): `extended-thinking`, `thinking`, `effort`.
 Re-check before a run on a new model — CLAUDE.md invariant 4.
 
-## Thinking parameter shape (the Task 2 decision)
+## Thinking parameter shape — and why this fork supports only one
 
-| Agent | Mode | Request |
+The API has two thinking parameterisations:
+
+| Shape | Models | Depth knob |
 |---|---|---|
-| `claude-haiku-4-5` (dev) | manual extended thinking — the **only** mode on 4.5 and earlier | `thinking={"type":"enabled","budget_tokens":N}` |
-| `claude-sonnet-5` (experiments) | adaptive — `"enabled"` returns **400** on 4.7+ | `thinking={"type":"adaptive"}`, depth via `output_config={"effort":...}` |
-| 4.6 generation | both; `budget_tokens` deprecated | prefer adaptive |
+| `thinking={"type":"adaptive"}` | 4.6 and later (incl. `claude-sonnet-5`) | `output_config.effort` |
+| `thinking={"type":"enabled","budget_tokens":N}` | 4.5 and earlier (incl. `claude-haiku-4-5`) | `budget_tokens`, ≥1024 and < `max_tokens` |
 
-- `budget_tokens` ≥ 1024 and < `max_tokens` (exception: interleaved thinking).
-- Effort levels: `low`, `medium`, `high` (= default = omitting it), `xhigh`, `max`.
-  Sonnet 5 supports all five and defaults to `high`.
-- Haiku 4.5 has **no interleaved thinking**; the beta header is accepted and ignored.
-- Manual mode requires the final assistant turn to *begin* with a thinking block;
-  adaptive drops that requirement.
+They do not overlap except on the 4.6 generation, where the manual shape is
+deprecated. **This fork sends adaptive only**, and commits to `claude-sonnet-5`
+as the thinking agent. Supporting both would mean two request shapes, two sets
+of constraints, and — worse — a dev agent exercising a code path the
+experiments never run.
 
-Implemented in `as1/asio/utils/retry.py`: `classify_anthropic_thinking_mode`
-picks the mode from the model id (≥4.6 adaptive, 3.7–4.5 budget, older
-unsupported, unknown → adaptive because that is the forward-compatible guess),
-and the run config supplies `mode` / `budget_tokens` / `effort`.
+A cheaper agent is still available for harness work: run `claude-haiku-4-5`
+with `agent_enable_thinking: false`, which sends no thinking parameters at all
+and needs no extra code. That is step 1 of the build order (validate the
+harness); step 2 onward is Sonnet 5 with thinking on.
+
+`check_thinking_supported` refuses at config-parse time — before anything is
+spent — if thinking is on for a pre-4.6 model, and again per call as a backstop
+for sampled/auxiliary agent models.
+
+Other facts that survive the simplification:
+
+- Effort levels: `low`, `medium`, `high` (= the default = omitting it), `xhigh`,
+  `max`. Sonnet 5 supports all five and defaults to `high`.
+- `max_tokens` is a hard ceiling on thinking **plus** response tokens.
+  `AnthropicChatModel` defaults to 2048, which is too small; set
+  `agent_max_tokens`.
+- Adaptive thinking interleaves automatically — no beta header — and Claude may
+  skip thinking entirely on easy inputs at lower effort. The lock handles that:
+  it keys on the in-flight `tool_use`, not on the presence of a thinking block.
+- Sonnet 5 keeps prior turns' thinking blocks in context and bills them as
+  input, unlike Haiku 4.5 and earlier which strip them server-side. Old blocks
+  therefore cost money until the manager deletes the messages holding them.
 
 ## Sampling parameters
 

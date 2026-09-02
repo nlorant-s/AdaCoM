@@ -38,6 +38,7 @@ from asio.agent.bcp_worker import BCPWorker
 from asio.logger import ExperimentLogger
 from asio.utils.judge import judge_result
 from asio.memory.memorymanager import MemoryError
+from asio.utils.retry import check_thinking_supported
 from asio.memory.context_lock import (
     apply_thinking_memory_config,
     resolve_lineage_log_path,
@@ -247,8 +248,8 @@ def create_model_and_formatter(
 
         model_kwargs = {"model_name": model_name, "api_key": api_key, "stream": stream}
         if max_tokens:
-            # AnthropicChatModel defaults to 2048, which is below a useful
-            # thinking budget (budget_tokens must stay under max_tokens).
+            # AnthropicChatModel defaults to 2048; max_tokens is the hard
+            # ceiling on thinking + response tokens, so it needs raising.
             model_kwargs["max_tokens"] = int(max_tokens)
         if base_url:
             # Anthropic SDK auto-appends /v1/messages, so remove trailing /v1 if present
@@ -435,7 +436,7 @@ class BCPSimpleToolReActWorkflow(Workflow):
         self.agent_enable_thinking = workflow_args.get("agent_enable_thinking", False)
         self.agent_reasoning_effort = workflow_args.get("agent_reasoning_effort", None)
         # Provider-specific thinking params, e.g.
-        #   {mode: auto|adaptive|budget|off, budget_tokens: 4096, effort: high}
+        #   {effort: low|medium|high|xhigh|max}  (adaptive thinking is the only shape)
         agent_thinking_config = workflow_args.get("agent_thinking_config", None)
         try:
             from omegaconf import OmegaConf, DictConfig
@@ -444,16 +445,14 @@ class BCPSimpleToolReActWorkflow(Workflow):
         except ImportError:
             pass
         self.agent_thinking_config = dict(agent_thinking_config) if agent_thinking_config else {}
+        # max_tokens is the hard ceiling on thinking + response tokens, and
+        # AnthropicChatModel defaults to 2048, which is too small for a
+        # thinking agent.
         self.agent_max_tokens = workflow_args.get("agent_max_tokens", None)
-        # A thinking budget must stay below the response cap or the API 400s.
-        budget = self.agent_thinking_config.get("budget_tokens")
-        if self.agent_enable_thinking and budget and self.agent_max_tokens:
-            if int(budget) >= int(self.agent_max_tokens):
-                raise ValueError(
-                    f"agent_thinking_config.budget_tokens ({budget}) must be less than "
-                    f"agent_max_tokens ({self.agent_max_tokens}); the Messages API "
-                    "rejects a budget that does not leave room for the response"
-                )
+        # Fail before spending anything if thinking is on for a model that
+        # cannot do adaptive thinking.
+        if self.agent_enable_thinking and _is_anthropic_model(self.agent_model_name):
+            check_thinking_supported(self.agent_model_name)
         # Per-rollout token / dollar cap for the frozen agent. Prices come
         # from the file at agent_cost_config.pricing_path, never from code.
         agent_cost_config = workflow_args.get("agent_cost_config", None)

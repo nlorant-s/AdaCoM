@@ -40,7 +40,7 @@ Msg = sys.modules["agentscope"].message.Msg
 class FakeAgentModel:
     """Emits an assistant turn with a signed thinking block and a tool_use."""
 
-    model_name = "claude-haiku-4-5"
+    model_name = "claude-sonnet-5"
 
     def __init__(self):
         self.step = 0
@@ -141,7 +141,7 @@ async def _run_loop(lineage_path, steps=3):
 
     agent = FakeAgentModel()
     tracker = CostTracker(
-        pricing={"claude-haiku-4-5": ModelPrice(input=1.0, output=5.0)},
+        pricing={"claude-sonnet-5": ModelPrice(input=2.0, output=10.0)},
         model_name=agent.model_name, max_usd=100.0,
     )
     worker = FakeWorker(memory, tracker)
@@ -242,7 +242,7 @@ def test_agent_cost_is_tracked_across_the_loop():
         assert t.totals.calls == 3
         assert t.totals.input_tokens == 1000 + 2000 + 3000
         assert t.totals.output_tokens == 600
-        assert abs(t.cost_usd - (6000 * 1.0 + 600 * 5.0) / 1_000_000) < 1e-12
+        assert abs(t.cost_usd - (6000 * 2.0 + 600 * 10.0) / 1_000_000) < 1e-12
         assert worker.abort_rollout is False
 
 

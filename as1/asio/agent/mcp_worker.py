@@ -223,7 +223,7 @@ class MCPWorker(ReActAgent):
         # Store MCP-specific parameters
         self.server_configs = server_configs
         self.enable_thinking = enable_thinking
-        # Provider-specific thinking parameters (budget_tokens / effort); see
+        # Provider-specific thinking parameters (effort); see
         # asio.utils.retry.get_anthropic_thinking_kwargs.
         self.thinking_config = thinking_config or {}
         self.tokenizer_model = tokenizer_model or os.environ.get(

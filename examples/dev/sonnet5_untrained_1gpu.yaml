@@ -1,7 +1,9 @@
 # Dev harness config: 1x L40S, no training.
 #
-#   Agent    : claude-haiku-4-5 via the direct Anthropic Messages API,
-#              extended thinking ON (context lock active).
+#   Agent    : claude-sonnet-5 via the direct Anthropic Messages API,
+#              adaptive thinking ON (context lock active). Same model and same
+#              request shape as the RL runs -- dev must exercise the path the
+#              experiments run, not a cheaper one with different parameters.
 #   Manager  : raw Qwen3-4B-Instruct-2507, served by one vLLM engine, NOT trained
 #              (mode: bench == the paper's "AdaCoM w/o train" baseline).
 #   Scope    : 5 tasks, max 15 agent iterations, lineage logging on, hard cost cap.
@@ -10,18 +12,24 @@
 # flip thinking on and confirm zero 400s over a few hundred manager steps before
 # any RL. Nothing here trains, so no trainer GPUs and no advantage config.
 #
-# Run (see examples/dev/haiku_untrained_1gpu.sbatch):
+# Run (see examples/dev/sonnet5_untrained_1gpu.sbatch):
 #   export ANTHROPIC_API_KEY=...            # never commit this
 #   export BROWSECOMP_PATH=/path/to/browsecomp_plus
 #   export MODEL_PATH=/path/to/Qwen3-4B-Instruct-2507
 #   export ADACOM_RUN_DIR=$SCRATCH/adacom_runs/dev01
-#   trinity run --config examples/dev/haiku_untrained_1gpu.yaml
+#   trinity run --config examples/dev/sonnet5_untrained_1gpu.yaml
 #
 # Make the 5-task file first, e.g.
 #   head -n 5 data/browsecomp_plus/test.jsonl > data/browsecomp_plus_dev5/test.jsonl
+#
+# For a pure harness check (no thinking, no lock, cheapest possible), set
+#   agent_model_name: claude-haiku-4-5
+#   agent_enable_thinking: false
+# and drop agent_thinking_config. That is step 1 of the build order; this file
+# is step 2.
 project: "adacom_sonnet5"
 group: "dev_1gpu"
-name: "a_haiku45_thinking_m_qwen3-4B_untrained"
+name: "a_sonnet5_thinking_m_qwen3-4B_untrained"
 dataset: browsecomp_plus_dev5
 mode: bench                              # explore + eval only; no trainer
 checkpoint_root_dir: ${oc.env:CHECKPOINT_ROOT_DIR,./checkpoints}
@@ -64,19 +72,18 @@ buffer:
 
         # --- frozen agent: Haiku 4.5, thinking on --------------------------
         agent_model_source: external
-        agent_model_name: claude-haiku-4-5
+        agent_model_name: claude-sonnet-5
         agent_api_key: ${oc.env:ANTHROPIC_API_KEY,null}
         agent_base_url: null             # direct Anthropic API, not DashScope
         agent_enable_thinking: true
-        # AnthropicChatModel defaults to max_tokens 2048; the thinking budget
-        # must stay below it, so raise the response cap explicitly.
+        # max_tokens is the hard ceiling on thinking + response tokens, and
+        # AnthropicChatModel defaults to 2048. Raise it explicitly.
         agent_max_tokens: 8192
-        # Haiku 4.5 is extended-thinking-only: budget_tokens, min 1024, and it
-        # must stay below max_tokens. Sonnet 5 needs {mode: adaptive, effort: ...}
-        # instead -- see docs/anthropic_api_notes.md.
+        # Adaptive thinking is the only shape this fork sends. effort is the
+        # single depth knob; "high" is the API default, so medium is a
+        # deliberate cost step-down for dev. See docs/anthropic_api_notes.md.
         agent_thinking_config:
-          mode: budget
-          budget_tokens: 3072
+          effort: medium
         # Thinking forbids temperature/top_k, so agent_temperature is ignored
         # for this agent; rollouts are not reproducible. Measure the baseline
         # variance before reading anything into a comparison (spec §5.5).
@@ -84,7 +91,7 @@ buffer:
         # --- hard cost cap ------------------------------------------------
         agent_cost_config:
           pricing_path: examples/dev/anthropic_pricing.yaml
-          max_usd: 2.0                   # per rollout; 5 tasks => <= $10 for the run
+          max_usd: 3.0                   # per rollout; 5 tasks => <= $15 for the run
           max_tokens: 2000000
           log_path: ${oc.env:ADACOM_RUN_DIR,./runs/dev}/cost/spend.jsonl
 

@@ -283,7 +283,7 @@ class MCPBenchWorkflow(Workflow):
         self.stop_on_no_tool_use = bool(workflow_args.get("stop_on_no_tool_use", True))
         self.agent_enable_thinking = workflow_args.get("agent_enable_thinking", False)
         # Provider-specific thinking params, e.g.
-        #   {mode: auto|adaptive|budget|off, budget_tokens: 4096, effort: high}
+        #   {effort: low|medium|high|xhigh|max}  (adaptive thinking is the only shape)
         agent_thinking_config = workflow_args.get("agent_thinking_config", None)
         try:
             from omegaconf import OmegaConf, DictConfig

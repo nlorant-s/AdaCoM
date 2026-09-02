@@ -1,13 +1,16 @@
 """Direct-Anthropic provider detection and thinking parameters (TASK 2).
 
-Parameter shapes verified 2026-09 against
-https://platform.claude.com/docs/en/build-with-claude/extended-thinking,
-.../thinking and .../effort:
-  * claude-haiku-4-5 (dev agent)  -> thinking={"type":"enabled","budget_tokens":N}
-  * claude-sonnet-5 (experiments) -> thinking={"type":"adaptive"} (+ output_config.effort);
-    "enabled" returns 400 there.
-  * With thinking on, temperature/top_k are rejected; Claude 4.7+ rejects any
-    non-default temperature/top_p/top_k regardless of thinking.
+This fork sends exactly one thinking shape, adaptive:
+``thinking={"type": "adaptive"}`` with depth via ``output_config.effort``.
+Manual extended thinking (``budget_tokens``) is deliberately unsupported --
+Claude 4.7+ rejects it with a 400, and supporting both would mean the dev agent
+exercised a request shape the experiments never send. Models that predate
+adaptive thinking must run with thinking off.
+
+Shapes verified 2026-09 against
+https://platform.claude.com/docs/en/build-with-claude/{extended-thinking,thinking,effort}.
+With thinking on, temperature/top_k are rejected; Claude 4.7+ rejects any
+non-default temperature/top_p/top_k regardless of thinking.
 """
 import os
 import sys
@@ -19,13 +22,14 @@ stubs.install()
 
 from asio.utils.retry import (  # noqa: E402
     ANTHROPIC_EFFORT_LEVELS,
-    DEFAULT_THINKING_BUDGET_TOKENS,
+    ThinkingUnsupportedError,
     anthropic_rejects_sampling_params,
-    classify_anthropic_thinking_mode,
+    check_thinking_supported,
     detect_model_provider,
     get_anthropic_sampling_kwargs,
     get_thinking_kwargs,
     parse_claude_version,
+    supports_adaptive_thinking,
 )
 
 
@@ -67,27 +71,17 @@ def test_parse_claude_version():
     assert parse_claude_version("claude-mythos") is None
 
 
-def test_thinking_mode_classification():
-    assert classify_anthropic_thinking_mode("claude-haiku-4-5") == "budget"
-    assert classify_anthropic_thinking_mode("claude-opus-4-5-20251101") == "budget"
-    assert classify_anthropic_thinking_mode("claude-3-7-sonnet-20250219") == "budget"
-    assert classify_anthropic_thinking_mode("claude-sonnet-5") == "adaptive"
-    assert classify_anthropic_thinking_mode("claude-opus-4-7") == "adaptive"
-    assert classify_anthropic_thinking_mode("claude-sonnet-4-6") == "adaptive"
-    assert classify_anthropic_thinking_mode("claude-fable-5-1") == "adaptive"
-    assert classify_anthropic_thinking_mode("claude-3-5-sonnet-20241022") == "unsupported"
+def test_adaptive_support_by_model():
+    assert supports_adaptive_thinking("claude-sonnet-5") is True
+    assert supports_adaptive_thinking("claude-opus-4-7") is True
+    assert supports_adaptive_thinking("claude-sonnet-4-6") is True
+    assert supports_adaptive_thinking("claude-fable-5-1") is True
+    # Pre-4.6 models would need the deprecated budget shape.
+    assert supports_adaptive_thinking("claude-haiku-4-5") is False
+    assert supports_adaptive_thinking("claude-opus-4-5-20251101") is False
+    assert supports_adaptive_thinking("claude-3-7-sonnet-20250219") is False
     # Unknown ids assume "newer than we know": adaptive, never a 400 "enabled".
-    assert classify_anthropic_thinking_mode("claude-something-new") == "adaptive"
-
-
-def test_haiku_45_gets_budget_thinking():
-    kw = get_thinking_kwargs(AnthropicChatModel("claude-haiku-4-5"), True)
-    assert kw == {"thinking": {"type": "enabled",
-                               "budget_tokens": DEFAULT_THINKING_BUDGET_TOKENS}}
-    kw = get_thinking_kwargs(AnthropicChatModel("claude-haiku-4-5"), True,
-                             {"budget_tokens": 2048})
-    assert kw["thinking"]["budget_tokens"] == 2048
-    assert "output_config" not in kw
+    assert supports_adaptive_thinking("claude-something-new") is True
 
 
 def test_sonnet_5_gets_adaptive_thinking():
@@ -95,29 +89,42 @@ def test_sonnet_5_gets_adaptive_thinking():
     assert get_thinking_kwargs(m, True) == {"thinking": {"type": "adaptive"}}
     kw = get_thinking_kwargs(m, True, {"effort": "medium"})
     assert kw == {"thinking": {"type": "adaptive"}, "output_config": {"effort": "medium"}}
-    # A budget must never be sent to an adaptive-only model.
+    # No budget is ever sent, whatever the config says.
     assert "budget_tokens" not in str(get_thinking_kwargs(m, True, {"budget_tokens": 8000}))
 
 
-def test_thinking_off_and_mode_override():
+def test_thinking_on_a_pre_adaptive_model_fails_loudly():
+    """Haiku 4.5 can still be the agent -- with thinking off."""
     m = AnthropicChatModel("claude-haiku-4-5")
+    assert get_thinking_kwargs(m, False) == {}          # fine
+    try:
+        get_thinking_kwargs(m, True)
+    except ThinkingUnsupportedError as e:
+        assert "claude-sonnet-5" in str(e) and "agent_enable_thinking: false" in str(e)
+    else:
+        raise AssertionError("expected ThinkingUnsupportedError")
+    # The same guard runs at config-parse time, before anything is spent.
+    check_thinking_supported("claude-sonnet-5")
+    try:
+        check_thinking_supported("claude-haiku-4-5")
+    except ThinkingUnsupportedError:
+        return
+    raise AssertionError("expected ThinkingUnsupportedError")
+
+
+def test_thinking_can_be_disabled_from_the_config():
+    m = AnthropicChatModel("claude-sonnet-5")
     assert get_thinking_kwargs(m, False) == {}
-    assert get_thinking_kwargs(m, True, {"mode": "off"}) == {}
-    assert get_thinking_kwargs(m, True, {"mode": "adaptive"}) == {"thinking": {"type": "adaptive"}}
-    assert get_thinking_kwargs(AnthropicChatModel("claude-sonnet-5"), True,
-                               {"mode": "budget", "budget_tokens": 1024}
-                               )["thinking"]["type"] == "enabled"
+    assert get_thinking_kwargs(m, True, {"enabled": False}) == {}
 
 
-def test_invalid_budget_and_effort_are_rejected():
-    m = AnthropicChatModel("claude-haiku-4-5")
-    for cfg, model in (({"budget_tokens": 512}, m),
-                       ({"effort": "turbo"}, AnthropicChatModel("claude-sonnet-5"))):
-        try:
-            get_thinking_kwargs(model, True, cfg)
-        except ValueError:
-            continue
-        raise AssertionError(f"expected ValueError for {cfg}")
+def test_invalid_effort_is_rejected():
+    try:
+        get_thinking_kwargs(AnthropicChatModel("claude-sonnet-5"), True, {"effort": "turbo"})
+    except ValueError as e:
+        assert "effort" in str(e)
+    else:
+        raise AssertionError("expected ValueError for an invalid effort")
     assert set(ANTHROPIC_EFFORT_LEVELS) == {"low", "medium", "high", "xhigh", "max"}
 
 
@@ -135,7 +142,8 @@ def test_other_providers_unchanged():
 def test_sampling_kwargs_respect_thinking_and_model():
     # Thinking on: no sampling params at all (temperature/top_k incompatible).
     assert get_anthropic_sampling_kwargs("claude-haiku-4-5", 0, True) == {}
-    # Thinking off on an older model: temperature only, never with top_p.
+    # Thinking off on an older model (the harness-check agent): temperature
+    # only, never alongside top_p.
     kw = get_anthropic_sampling_kwargs("claude-haiku-4-5", 0, False)
     assert kw == {"temperature": 0} and "top_p" not in kw
     # 4.7+ rejects non-default sampling whether or not thinking is on.
