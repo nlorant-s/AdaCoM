@@ -1,0 +1,147 @@
+# Dev harness config: 1x L40S, no training.
+#
+#   Agent    : claude-haiku-4-5 via the direct Anthropic Messages API,
+#              extended thinking ON (context lock active).
+#   Manager  : raw Qwen3-4B-Instruct-2507, served by one vLLM engine, NOT trained
+#              (mode: bench == the paper's "AdaCoM w/o train" baseline).
+#   Scope    : 5 tasks, max 15 agent iterations, lineage logging on, hard cost cap.
+#
+# This is step 2 of the revised build order in docs/adacom_sonnet5_spec.md §12:
+# flip thinking on and confirm zero 400s over a few hundred manager steps before
+# any RL. Nothing here trains, so no trainer GPUs and no advantage config.
+#
+# Run (see examples/dev/haiku_untrained_1gpu.sbatch):
+#   export ANTHROPIC_API_KEY=...            # never commit this
+#   export BROWSECOMP_PATH=/path/to/browsecomp_plus
+#   export MODEL_PATH=/path/to/Qwen3-4B-Instruct-2507
+#   export ADACOM_RUN_DIR=$SCRATCH/adacom_runs/dev01
+#   trinity run --config examples/dev/haiku_untrained_1gpu.yaml
+#
+# Make the 5-task file first, e.g.
+#   head -n 5 data/browsecomp_plus/test.jsonl > data/browsecomp_plus_dev5/test.jsonl
+project: "adacom_sonnet5"
+group: "dev_1gpu"
+name: "a_haiku45_thinking_m_qwen3-4B_untrained"
+dataset: browsecomp_plus_dev5
+mode: bench                              # explore + eval only; no trainer
+checkpoint_root_dir: ${oc.env:CHECKPOINT_ROOT_DIR,./checkpoints}
+continue_from_checkpoint: true
+
+model:
+  # Untrained manager: point straight at the base instruct model.
+  model_path: ${oc.env:MODEL_PATH,./models/Qwen3-4B-Instruct-2507}
+  max_response_tokens: 4096
+  max_model_len: 32768
+
+cluster:
+  node_num: 1
+  gpu_per_node: 1                        # one vLLM engine, no trainer GPUs
+
+buffer:
+  total_epochs: 1
+  batch_size: 5                          # the 5 dev tasks, one batch
+  explorer_input:
+    eval_tasksets:
+    - name: bcp_dev5
+      storage_type: file
+      path: data/browsecomp_plus_dev5    # a 5-row copy of the BCP test split
+      split: test
+      repeat_times: 1
+      format:
+        prompt_key: 'query'
+        response_key: 'answer'
+        task_id_key: 'query_id'
+      workflow_args:
+        max_iterations: 15
+        stop_on_no_tool_use: True
+        searcher_type: "bm25"            # no retriever GPU, no 200GB dense index
+        dataset: ${dataset}
+        project: ${project}
+        group: ${group}
+        name: ${name}
+        index_path: ${oc.env:BROWSECOMP_PATH,""}/indexes/bm25
+        browsecomp_path: ${oc.env:BROWSECOMP_PATH,null}
+
+        # --- frozen agent: Haiku 4.5, thinking on --------------------------
+        agent_model_source: external
+        agent_model_name: claude-haiku-4-5
+        agent_api_key: ${oc.env:ANTHROPIC_API_KEY,null}
+        agent_base_url: null             # direct Anthropic API, not DashScope
+        agent_enable_thinking: true
+        # AnthropicChatModel defaults to max_tokens 2048; the thinking budget
+        # must stay below it, so raise the response cap explicitly.
+        agent_max_tokens: 8192
+        # Haiku 4.5 is extended-thinking-only: budget_tokens, min 1024, and it
+        # must stay below max_tokens. Sonnet 5 needs {mode: adaptive, effort: ...}
+        # instead -- see docs/anthropic_api_notes.md.
+        agent_thinking_config:
+          mode: budget
+          budget_tokens: 3072
+        # Thinking forbids temperature/top_k, so agent_temperature is ignored
+        # for this agent; rollouts are not reproducible. Measure the baseline
+        # variance before reading anything into a comparison (spec §5.5).
+
+        # --- hard cost cap ------------------------------------------------
+        agent_cost_config:
+          pricing_path: examples/dev/anthropic_pricing.yaml
+          max_usd: 2.0                   # per rollout; 5 tasks => <= $10 for the run
+          max_tokens: 2000000
+          log_path: ${oc.env:ADACOM_RUN_DIR,./runs/dev}/cost/spend.jsonl
+
+        # --- context manager ----------------------------------------------
+        tokenizer_model: ${oc.env:MODEL_PATH,./models/Qwen3-4B-Instruct-2507}
+        memory_model: Qwen3-4B
+        memory_config:
+          use_bg_info: true
+          background_info_key: anthropic_tool_use
+          chat_tokenizer_model: ${oc.env:MODEL_PATH,./models/Qwen3-4B-Instruct-2507}
+          max_model_len: ${model.max_model_len}
+          max_response_tokens: ${model.max_response_tokens}
+          # agent_thinking_enabled is threaded in from agent_enable_thinking.
+          # Warm-up posture: drop illegal ops silently, no RL penalty yet.
+          lock_violation_penalty: null
+          # One JSONL per rollout: pre/post context snapshots + lineage.
+          lineage_log_dir: ${oc.env:ADACOM_RUN_DIR,./runs/dev}/lineage
+          # Dev run: a context the API would reject should stop the rollout
+          # loudly rather than 400 halfway through.
+          anthropic_validity_mode: raise
+        reward_config:
+          parsing_failure_penalty: -0.5
+          out_of_tokens_penalty: -0.8
+          duplicate_call_penalty: -0.4
+          enable_compression_doc_reward: false
+          enable_search_hit_reward: true
+          search_hit_gold_positive: 0.6
+          search_hit_key_positive: 0.3
+      rollout_args:
+        temperature: 1.0                 # manager sampling (paper: 1.0)
+        top_p: 1.0
+        max_tokens: 4096
+
+    default_workflow_type: 'bcp_simple_react_workflow'
+
+explorer:
+  eval_on_startup: true
+  eval_interval: 1
+  max_repeat_times_per_runner: 1
+  max_timeout: 3600
+  runner_per_model: 4                    # 5 tasks; keep API concurrency modest
+  force_eval_create_logger: true         # every dev rollout gets a run dir
+  rollout_model:
+    enable_history: true
+    enable_thinking: false               # manager reasoning off; agent thinking is separate
+    enable_openai_api: true
+    enable_auto_tool_choice: false
+    engine_num: 1
+    tensor_parallel_size: 1
+    enable_prefix_caching: true
+    enforce_eager: false
+    dtype: bfloat16
+    seed: 42
+    gpu_memory_utilization: 0.85         # 48GB L40S, 4B manager at 32K ctx
+    enable_chunked_prefill: true
+    tool_call_parser: null
+    reasoning_parser: null
+
+monitor:
+  monitor_type: tensorboard              # no wandb key needed for a dev run

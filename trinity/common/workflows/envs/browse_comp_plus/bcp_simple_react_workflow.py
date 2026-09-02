@@ -202,6 +202,7 @@ def create_model_and_formatter(
     stream: bool = False,
     base_url: str | None = None,
     reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
     **kwargs,
 ):
     """Create model and formatter instances.
@@ -245,6 +246,10 @@ def create_model_and_formatter(
             api_key = os.environ.get("ANTHROPIC_API_KEY")
 
         model_kwargs = {"model_name": model_name, "api_key": api_key, "stream": stream}
+        if max_tokens:
+            # AnthropicChatModel defaults to 2048, which is below a useful
+            # thinking budget (budget_tokens must stay under max_tokens).
+            model_kwargs["max_tokens"] = int(max_tokens)
         if base_url:
             # Anthropic SDK auto-appends /v1/messages, so remove trailing /v1 if present
             anthropic_base_url = base_url.rstrip("/")
@@ -439,6 +444,16 @@ class BCPSimpleToolReActWorkflow(Workflow):
         except ImportError:
             pass
         self.agent_thinking_config = dict(agent_thinking_config) if agent_thinking_config else {}
+        self.agent_max_tokens = workflow_args.get("agent_max_tokens", None)
+        # A thinking budget must stay below the response cap or the API 400s.
+        budget = self.agent_thinking_config.get("budget_tokens")
+        if self.agent_enable_thinking and budget and self.agent_max_tokens:
+            if int(budget) >= int(self.agent_max_tokens):
+                raise ValueError(
+                    f"agent_thinking_config.budget_tokens ({budget}) must be less than "
+                    f"agent_max_tokens ({self.agent_max_tokens}); the Messages API "
+                    "rejects a budget that does not leave room for the response"
+                )
         # Per-rollout token / dollar cap for the frozen agent. Prices come
         # from the file at agent_cost_config.pricing_path, never from code.
         agent_cost_config = workflow_args.get("agent_cost_config", None)
@@ -611,12 +626,14 @@ class BCPSimpleToolReActWorkflow(Workflow):
                     model_name, api_key=api_key, base_url=base_url or None,
                     reasoning_effort=self.agent_reasoning_effort,
                     stream=self.agent_stream,
+                    max_tokens=self.agent_max_tokens,
                 )
             else:
                 self.agent_model, self.agent_formatter = create_model_and_formatter(
                     self.sampled_agent_name, self.agent_api_key, base_url=self.sampled_agent_base_url,
                     reasoning_effort=self.agent_reasoning_effort,
                     stream=self.agent_stream,
+                    max_tokens=self.agent_max_tokens,
                 )
             logger.info(f"Initialized agent model: {self.sampled_agent_name}")
             self._agent_model_cache[self.sampled_agent_name] = (self.agent_model, self.agent_formatter)
