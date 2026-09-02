@@ -147,6 +147,44 @@ def _install_agentscope() -> None:
     formatter.AnthropicChatFormatter = type("AnthropicChatFormatter", (FormatterBase,), {})
     pkg.formatter = formatter
 
+    agent = _module("agentscope.agent")
+
+    class AgentBase:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class ReActAgent(AgentBase):
+        pass
+
+    agent.AgentBase = AgentBase
+    agent.ReActAgent = ReActAgent
+    pkg.agent = agent
+
+    tool = _module("agentscope.tool")
+
+    class ToolResponse:
+        def __init__(self, content=None, metadata=None, **kwargs):
+            self.content = content
+            self.metadata = metadata
+
+    class Toolkit:
+        def __init__(self, *args, **kwargs):
+            self.tools = {}
+
+        def register_tool_function(self, func, **kwargs):
+            self.tools[getattr(func, "__name__", str(func))] = func
+
+        def get_json_schemas(self):
+            return []
+
+    tool.ToolResponse = ToolResponse
+    tool.Toolkit = Toolkit
+    pkg.tool = tool
+
+    types_mod = _module("agentscope.types")
+    types_mod.JSONSerializableObject = object
+    pkg.types = types_mod
+
 
 def _install_transformers() -> None:
     mod = _module("transformers")

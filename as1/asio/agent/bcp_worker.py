@@ -31,6 +31,7 @@ from asio.memory.utils import format_msgs
 from asio.agent.memory_reward_utils import (
     build_deferred_out_of_tokens_rewards,
     build_insufficient_budget_reward,
+    build_lock_violation_reward,
     build_recent_compression_record,
     build_terminal_out_of_tokens_reward,
     calculate_budget_penalty,
@@ -1078,6 +1079,41 @@ class BCPWorker(ReActAgent):
                 "traceback": tb,
             }
 
+    def _record_lock_violation_penalty(self):
+        """Turn dropped lock violations into a format penalty on this step.
+
+        The context lock drops ops that target the in-flight tool-use cycle
+        before they are applied; with `memory_config.lock_violation_penalty`
+        set, the manager also gets an RL signal for having produced them.
+        Default (None) is a silent drop — the right setting for SFT / warm-up.
+
+        Consumed here rather than in the attempt loop below because a round can
+        raise after the lock ran (degeneration, invalid context), leaving no
+        `last_results`; the violations would otherwise be charged to a later step.
+        """
+        violations = getattr(self.memory, "lock_violations_last", None) or []
+        if not violations:
+            return
+        try:
+            self.memory.lock_violations_last = []  # one penalty per round
+        except AttributeError:
+            pass
+        if not self.calculate_reward:
+            return
+        reward_entry = build_lock_violation_reward(
+            violations,
+            getattr(self.memory, "lock_violation_penalty", None),
+            iteration=self.current_iteration,
+            step=self.compression_step,
+        )
+        if reward_entry is None:
+            return
+        self.intermediate_rewards.append(reward_entry)
+        if self.experiment_logger:
+            self.experiment_logger.log_debug(
+                f"Intermediate Reward Recorded (lock_violation): {json.dumps(reward_entry)}"
+            )
+
     def _process_memory_result(self, context: str = ""):
         """Process compression result, record penalties for failed attempts and reward for success.
 
@@ -1088,6 +1124,7 @@ class BCPWorker(ReActAgent):
         Args:
             context: Context string for logging (e.g., "reasoning", "acting").
         """
+        self._record_lock_violation_penalty()
         add_result = getattr(self.memory, "last_results", None)
 
         if not add_result:

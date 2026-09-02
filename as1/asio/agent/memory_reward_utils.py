@@ -223,3 +223,35 @@ def build_deferred_out_of_tokens_rewards(
         })
 
     return rewards
+
+
+def build_lock_violation_reward(
+    violations: List[Dict[str, Any]],
+    penalty: Optional[float],
+    iteration: int,
+    step: int,
+) -> Optional[Dict[str, Any]]:
+    """Format penalty for ops that targeted the locked in-flight tool-use cycle.
+
+    The context lock drops those ops before they are applied (see
+    ``asio.memory.context_lock``); this turns the drop into an RL signal on the
+    manager step that produced them. ``penalty`` is the configured magnitude —
+    ``None`` means silent drop, which is the default and the right setting for
+    SFT / warm-up. The magnitude is flat, not scaled by the number of ops, to
+    match the shape of the degeneration reward.
+    """
+    if not violations or penalty is None:
+        return None
+    reasons = sorted({str(v.get("reason", "")) for v in violations if isinstance(v, dict)})
+    return {
+        "text_content": (
+            f"lock_violation: {len(violations)} modification(s) targeted the "
+            f"locked in-flight tool-use cycle ({'; '.join(reasons)})"
+        ),
+        "reward": float(penalty),
+        "reason": "lock_violation",
+        "count": len(violations),
+        "violations": [v for v in violations if isinstance(v, dict)],
+        "iteration": iteration,
+        "step": step,
+    }
