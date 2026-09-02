@@ -282,6 +282,16 @@ class MCPBenchWorkflow(Workflow):
         self.max_iters = int(workflow_args.get("max_iterations", 50))
         self.stop_on_no_tool_use = bool(workflow_args.get("stop_on_no_tool_use", True))
         self.agent_enable_thinking = workflow_args.get("agent_enable_thinking", False)
+        # Provider-specific thinking params, e.g.
+        #   {mode: auto|adaptive|budget|off, budget_tokens: 4096, effort: high}
+        agent_thinking_config = workflow_args.get("agent_thinking_config", None)
+        try:
+            from omegaconf import OmegaConf, DictConfig
+            if isinstance(agent_thinking_config, DictConfig):
+                agent_thinking_config = OmegaConf.to_container(agent_thinking_config, resolve=True)
+        except ImportError:
+            pass
+        self.agent_thinking_config = dict(agent_thinking_config) if agent_thinking_config else {}
         self.tokenizer_model = workflow_args.get("tokenizer_model")
         self.tool_cache_path = workflow_args.get("tool_cache_path")
         self.tool_schemas_path = workflow_args.get("tool_schemas_path")
@@ -491,6 +501,7 @@ class MCPBenchWorkflow(Workflow):
             es_fallback_config=self.es_fallback_config,
             skip_live_mcp_servers=self.skip_live_mcp_servers,
             enable_thinking=self.agent_enable_thinking,
+            thinking_config=self.agent_thinking_config,
         )
         timing_info["worker_creation"] = time.time() - worker_creation_start
         logger.info(f"MCPWorker creation took {timing_info['worker_creation']:.2f} seconds")

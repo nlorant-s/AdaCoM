@@ -429,6 +429,16 @@ class BCPSimpleToolReActWorkflow(Workflow):
         self.log_rollout_time = bool(workflow_args.get("log_rollout_time", False))
         self.agent_enable_thinking = workflow_args.get("agent_enable_thinking", False)
         self.agent_reasoning_effort = workflow_args.get("agent_reasoning_effort", None)
+        # Provider-specific thinking params, e.g.
+        #   {mode: auto|adaptive|budget|off, budget_tokens: 4096, effort: high}
+        agent_thinking_config = workflow_args.get("agent_thinking_config", None)
+        try:
+            from omegaconf import OmegaConf, DictConfig
+            if isinstance(agent_thinking_config, DictConfig):
+                agent_thinking_config = OmegaConf.to_container(agent_thinking_config, resolve=True)
+        except ImportError:
+            pass
+        self.agent_thinking_config = dict(agent_thinking_config) if agent_thinking_config else {}
         self.agent_stream = bool(workflow_args.get("agent_stream", False))
         self.agent_temperature = float(workflow_args.get("agent_temperature", 0))
 
@@ -721,6 +731,7 @@ class BCPSimpleToolReActWorkflow(Workflow):
             tokenizer_model=self.tokenizer_model,
             tokenizer=self._cached_tokenizer,
             enable_thinking=self.agent_enable_thinking,
+            thinking_config=self.agent_thinking_config,
             **({'agent_temperature': self.agent_temperature} if self.sampled_agent_source == 'auxiliary' else {}),
         )
         timing_info['worker_creation'] = time.time() - worker_creation_start

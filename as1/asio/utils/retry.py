@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 import traceback
 from collections.abc import AsyncIterable
@@ -47,7 +48,163 @@ def convert_tools_openai_to_anthropic(tools: list[dict]) -> list[dict]:
     return converted
 
 
-def get_thinking_kwargs(model, enable_thinking: bool = True) -> dict:
+# ---------------------------------------------------------------------------
+# Direct Anthropic (Messages API) thinking configuration
+# ---------------------------------------------------------------------------
+# Verified against https://platform.claude.com/docs/en/build-with-claude/
+# {extended-thinking,thinking,effort} (docs.claude.com redirects there):
+#
+#  * Manual extended thinking is `thinking={"type": "enabled",
+#    "budget_tokens": N}` with N >= 1024 and N < max_tokens. It is the *only*
+#    thinking mode on Claude 4.5 and earlier — including claude-haiku-4-5,
+#    our dev agent.
+#  * Adaptive thinking is `thinking={"type": "adaptive"}`, with depth steered
+#    by `output_config={"effort": ...}` instead of a token budget. Claude 4.7
+#    and later — including claude-sonnet-5, the experiment agent — reject
+#    `type: "enabled"` with a 400.
+#  * Claude 4.6 accepts both; the docs recommend adaptive there.
+#  * Sampling: on Claude 4.7+ any non-default temperature/top_p/top_k is a 400
+#    on every request. On older models the restriction applies only while
+#    thinking is on (temperature and top_k incompatible, top_p allowed in
+#    [0.95, 1]). So a thinking-enabled Claude agent sends no sampling params
+#    at all — see get_anthropic_sampling_kwargs.
+MIN_THINKING_BUDGET_TOKENS = 1024
+DEFAULT_THINKING_BUDGET_TOKENS = 4096
+ANTHROPIC_EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+# thinking mode by version: >= this uses adaptive, >= 3.7 uses budget.
+_ADAPTIVE_FROM = (4, 6)
+_BUDGET_FROM = (3, 7)
+# Non-default sampling params are rejected outright from this version on.
+_NO_SAMPLING_FROM = (4, 7)
+# Model families released after the 4.x line; they are all adaptive-only.
+_POST_4X_FAMILIES = ("fable", "mythos")
+
+
+def parse_claude_version(model_name: str):
+    """Best-effort (major, minor) for a Claude model id, or None.
+
+    Handles both orderings used by Anthropic ids: ``claude-sonnet-4-6``,
+    ``claude-sonnet-5``, ``claude-haiku-4-5``, ``claude-3-7-sonnet-20250219``,
+    ``claude-opus-4-1-20250805``. Trailing date stamps are ignored.
+    """
+    name = (model_name or "").lower()
+    numbers = []
+    for part in re.split(r"[^0-9]+", name):
+        if part:
+            numbers.append(int(part))
+    numbers = [n for n in numbers if n < 100]  # drop 20250219-style stamps
+    if not numbers:
+        return None
+    major = numbers[0]
+    minor = numbers[1] if len(numbers) > 1 else 0
+    return (major, minor)
+
+
+def classify_anthropic_thinking_mode(model_name: str) -> str:
+    """Return "adaptive", "budget" or "unsupported" for a direct-Anthropic id."""
+    name = (model_name or "").lower()
+    if any(f in name for f in _POST_4X_FAMILIES):
+        return "adaptive"
+    version = parse_claude_version(name)
+    if version is None:
+        # Unknown id: assume it is newer than what we know about. "enabled"
+        # 400s on new models, "adaptive" is the forward-compatible guess.
+        return "adaptive"
+    if version >= _ADAPTIVE_FROM:
+        return "adaptive"
+    if version >= _BUDGET_FROM:
+        return "budget"
+    return "unsupported"
+
+
+def anthropic_rejects_sampling_params(model_name: str) -> bool:
+    """True if the model 400s on any non-default temperature/top_p/top_k."""
+    name = (model_name or "").lower()
+    if any(f in name for f in _POST_4X_FAMILIES):
+        return True
+    version = parse_claude_version(name)
+    if version is None:
+        return True
+    return version >= _NO_SAMPLING_FROM
+
+
+def _is_direct_anthropic(model) -> bool:
+    """True for the direct Anthropic Messages API client.
+
+    Deliberately class-based, not name-based: an OpenAI-compatible relay
+    serving a claude-* model is detected as provider "anthropic" for message
+    formatting, but its request kwargs are OpenAI-shaped, so a top-level
+    `thinking` would be wrong there. Excludes the DashScope proxy, which takes
+    thinking through extra_body.
+    """
+    model_class_name = type(model).__name__.lower()
+    if "dashscope" in model_class_name:
+        return False
+    return "anthropic" in model_class_name or "bedrock" in model_class_name
+
+
+def get_anthropic_thinking_kwargs(model_name: str, enable_thinking: bool = True,
+                                  thinking_config: Optional[dict] = None) -> dict:
+    """Request kwargs enabling thinking on the direct Anthropic client.
+
+    ``thinking_config`` (from the run config) may carry:
+      - ``mode``: "auto" (default), "adaptive", "budget" or "off"
+      - ``budget_tokens``: budget-mode thinking budget (default 4096, min 1024)
+      - ``effort``: adaptive-mode effort level; omitted unless set, since the
+        API default ("high") is what omitting the parameter means.
+    """
+    cfg = dict(thinking_config or {})
+    if not enable_thinking or cfg.get("mode") == "off":
+        return {}
+
+    mode = cfg.get("mode", "auto")
+    if mode in (None, "auto"):
+        mode = classify_anthropic_thinking_mode(model_name)
+    if mode == "unsupported":
+        return {}
+
+    if mode == "adaptive":
+        kwargs = {"thinking": {"type": "adaptive"}}
+        effort = cfg.get("effort")
+        if effort:
+            effort = str(effort).lower()
+            if effort not in ANTHROPIC_EFFORT_LEVELS:
+                raise ValueError(
+                    f"Invalid effort {effort!r}; expected one of {ANTHROPIC_EFFORT_LEVELS}"
+                )
+            kwargs["output_config"] = {"effort": effort}
+        return kwargs
+
+    if mode == "budget":
+        budget = int(cfg.get("budget_tokens", DEFAULT_THINKING_BUDGET_TOKENS))
+        if budget < MIN_THINKING_BUDGET_TOKENS:
+            raise ValueError(
+                f"budget_tokens={budget} is below the API minimum "
+                f"{MIN_THINKING_BUDGET_TOKENS}"
+            )
+        return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+
+    raise ValueError(f"Unknown thinking mode {mode!r}")
+
+
+def get_anthropic_sampling_kwargs(model_name: str, temperature: float = 0,
+                                  enable_thinking: bool = True) -> dict:
+    """Sampling kwargs that a Claude model will actually accept.
+
+    Empty whenever thinking is on (temperature and top_k are incompatible with
+    thinking) or the model rejects non-default sampling outright (4.7+).
+    Consequence for us: a thinking-enabled agent cannot be pinned to
+    temperature 0, so rollout variance is higher than the paper's setup.
+    """
+    if enable_thinking or anthropic_rejects_sampling_params(model_name):
+        return {}
+    # top_p is never sent alongside temperature: Claude rejects both together.
+    return {"temperature": temperature}
+
+
+def get_thinking_kwargs(model, enable_thinking: bool = True,
+                        thinking_config: Optional[dict] = None) -> dict:
     """Get thinking/reasoning kwargs based on model type.
 
     Returns extra kwargs to enable thinking for models that support it.
@@ -57,6 +214,9 @@ def get_thinking_kwargs(model, enable_thinking: bool = True) -> dict:
     - qwen3-max: extra_body={"enable_thinking": True}
     - doubao-*: extra_body={"enable_thinking": True}
     - DashScopeClaudeChatModel: extra_body={"thinking": {"type": "enabled", "budget_tokens": 4096}}
+    - AnthropicChatModel (direct Messages API): top-level `thinking`, either
+      {"type": "enabled", "budget_tokens": N} or {"type": "adaptive"} plus an
+      optional output_config.effort — see get_anthropic_thinking_kwargs.
     - GeminiChatModel: thinking_config set at init time (not here)
     """
     model_class_name = type(model).__name__.lower()
@@ -75,6 +235,10 @@ def get_thinking_kwargs(model, enable_thinking: bool = True) -> dict:
         return {"extra_body": {
             "thinking": {"type": "enabled", "budget_tokens": 4096},
         }}
+
+    # Direct Anthropic client: kwargs go straight into messages.create().
+    if _is_direct_anthropic(model):
+        return get_anthropic_thinking_kwargs(model_name, enable_thinking, thinking_config)
 
     # OpenAI-compatible models with enable_thinking support
     thinking_models = ["qwen3-max", "doubao"]
@@ -104,6 +268,11 @@ def detect_model_provider(model) -> Literal["openai", "anthropic", "unknown"]:
     # so it should be treated as "openai" for request formatting purposes
     if "dashscopeclaude" in model_class_name:
         return "openai"
+
+    # agentscope's AnthropicChatModel talks to the Messages API directly, so
+    # request kwargs (thinking, output_config) are top-level, not extra_body.
+    if "anthropicchatmodel" in model_class_name:
+        return "anthropic"
 
     if "anthropic" in model_class_name or "claude" in model_class_name or "bedrock" in model_class_name:
         return "anthropic"

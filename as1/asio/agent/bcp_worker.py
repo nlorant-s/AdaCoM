@@ -22,7 +22,10 @@ from agentscope.tool import Toolkit, ToolResponse
 from agentscope.memory import MemoryBase
 from agentscope.message import Msg, TextBlock, ToolUseBlock, ToolResultBlock
 from asio.logger import ExperimentLogger
-from asio.utils.retry import retry_model_call, convert_tools_openai_to_anthropic, detect_model_provider, get_thinking_kwargs
+from asio.utils.retry import (
+    retry_model_call, convert_tools_openai_to_anthropic, detect_model_provider,
+    get_thinking_kwargs, get_anthropic_sampling_kwargs,
+)
 from collections import defaultdict
 from asio.memory.utils import format_msgs
 from asio.agent.memory_reward_utils import (
@@ -91,17 +94,20 @@ Core Requirement (Data Traceability): Each document is identified by a unique ID
 """
 
 
-def get_model_call_kwargs(model, enable_thinking: bool = True, temperature: float = 0) -> dict:
+def get_model_call_kwargs(model, enable_thinking: bool = True, temperature: float = 0,
+                          thinking_config: dict = None) -> dict:
     """Get all model-specific kwargs (temperature + thinking) for agent calls."""
     model_name = (getattr(model, "model_name", "") or "").lower()
     # Claude rejects temperature+top_p together; gpt-5 doesn't accept temperature at all.
+    # With thinking on (or on Claude 4.7+ at all) Claude takes no sampling
+    # params whatsoever — get_anthropic_sampling_kwargs holds those rules.
     if "gpt-5" in model_name:
         kwargs = {}
     elif "claude" in model_name or "anthropic" in model_name:
-        kwargs = {"temperature": temperature}
+        kwargs = get_anthropic_sampling_kwargs(model_name, temperature, enable_thinking)
     else:
         kwargs = {"temperature": temperature, "top_p": 1}
-    thinking = get_thinking_kwargs(model, enable_thinking)
+    thinking = get_thinking_kwargs(model, enable_thinking, thinking_config)
     # Merge extra_body if both have it
     if "extra_body" in kwargs and "extra_body" in thinking:
         kwargs["extra_body"] = {**kwargs["extra_body"], **thinking["extra_body"]}
@@ -159,6 +165,7 @@ class BCPWorker(ReActAgent):
         tokenizer_model: Optional[str] = None,
         tokenizer: Optional[Any] = None,
         enable_thinking: bool = True,
+        thinking_config: Optional[dict] = None,
         agent_temperature: float = 0,
         **kwargs: Any,
     ) -> None:
@@ -208,6 +215,9 @@ class BCPWorker(ReActAgent):
         self.tokenizer_model = tokenizer_model or os.environ.get("DEFAULT_TOKENIZER_MODEL", "Qwen/Qwen3-4B-Instruct-2507")
         self.tokenizer = tokenizer  # Pre-loaded tokenizer (skip loading in _init_searcher if set)
         self.enable_thinking = enable_thinking
+        # Provider-specific thinking parameters (budget_tokens / effort); see
+        # asio.utils.retry.get_anthropic_thinking_kwargs.
+        self.thinking_config = thinking_config or {}
         self.agent_temperature = agent_temperature
 
         # Reward related
@@ -1282,7 +1292,8 @@ class BCPWorker(ReActAgent):
                 tools=tools,
                 max_retries=20,
                 experiment_logger=self.experiment_logger,
-                **get_model_call_kwargs(self.model, self.enable_thinking, self.agent_temperature)
+                **get_model_call_kwargs(self.model, self.enable_thinking, self.agent_temperature,
+                                        getattr(self, 'thinking_config', None))
             )
             
             # Response shape (tool_call recovery, channel-marker cleanup,
@@ -1438,7 +1449,8 @@ class BCPWorker(ReActAgent):
                 formatted_messages,
                 max_retries=20,
                 experiment_logger=self.experiment_logger,
-                **get_model_call_kwargs(self.model, self.enable_thinking, self.agent_temperature)
+                **get_model_call_kwargs(self.model, self.enable_thinking, self.agent_temperature,
+                                        getattr(self, 'thinking_config', None))
             )
             
             # Convert response to Msg

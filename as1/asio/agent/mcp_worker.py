@@ -26,7 +26,10 @@ from agentscope.tool import Toolkit, ToolResponse
 from agentscope.memory import MemoryBase
 from agentscope.message import Msg, TextBlock, ToolUseBlock, ToolResultBlock
 from asio.logger import ExperimentLogger
-from asio.utils.retry import retry_model_call, detect_model_provider, get_thinking_kwargs
+from asio.utils.retry import (
+    retry_model_call, detect_model_provider, get_thinking_kwargs,
+    get_anthropic_sampling_kwargs,
+)
 from asio.agent.memory_reward_utils import (
     build_deferred_out_of_tokens_rewards,
     build_insufficient_budget_reward,
@@ -139,11 +142,19 @@ class ToolResultCache:
         return {"entries": len(self._data)}
 
 
-def get_model_call_kwargs(model, enable_thinking: bool = True) -> dict:
+def get_model_call_kwargs(model, enable_thinking: bool = True,
+                          thinking_config: dict = None) -> dict:
     """Get all model-specific kwargs (temperature + thinking) for agent calls."""
     model_name = (getattr(model, "model_name", "") or "").lower()
-    kwargs = {} if "gpt-5" in model_name else {"temperature": 0, "top_p": 1}
-    thinking = get_thinking_kwargs(model, enable_thinking)
+    if "gpt-5" in model_name:
+        kwargs = {}
+    elif "claude" in model_name or "anthropic" in model_name:
+        # Claude rejects temperature+top_p together, and takes no sampling
+        # params at all with thinking on / on 4.7+.
+        kwargs = get_anthropic_sampling_kwargs(model_name, 0, enable_thinking)
+    else:
+        kwargs = {"temperature": 0, "top_p": 1}
+    thinking = get_thinking_kwargs(model, enable_thinking, thinking_config)
     if "extra_body" in kwargs and "extra_body" in thinking:
         kwargs["extra_body"] = {**kwargs["extra_body"], **thinking["extra_body"]}
     else:
@@ -186,6 +197,7 @@ class MCPWorker(ReActAgent):
         skip_live_mcp_servers: Optional[List[str]] = None,
         tool_schemas_path: Optional[str] = None,
         enable_thinking: bool = True,
+        thinking_config: Optional[dict] = None,
         **kwargs: Any,
     ) -> None:
         """Initialize the MCP Worker agent.
@@ -217,6 +229,9 @@ class MCPWorker(ReActAgent):
         # Store MCP-specific parameters
         self.server_configs = server_configs
         self.enable_thinking = enable_thinking
+        # Provider-specific thinking parameters (budget_tokens / effort); see
+        # asio.utils.retry.get_anthropic_thinking_kwargs.
+        self.thinking_config = thinking_config or {}
         self.tokenizer_model = tokenizer_model or os.environ.get(
             "DEFAULT_TOKENIZER_MODEL", "Qwen/Qwen3-4B-Instruct-2507"
         )
@@ -1251,7 +1266,8 @@ class MCPWorker(ReActAgent):
                     tools=tools,
                     max_retries=20,
                     experiment_logger=self.experiment_logger,
-                    **get_model_call_kwargs(self.model, self.enable_thinking),
+                    **get_model_call_kwargs(self.model, self.enable_thinking,
+                                            getattr(self, 'thinking_config', None)),
                 ),
                 timeout=180,  # 3 min max per reasoning step
             )
@@ -1415,7 +1431,8 @@ class MCPWorker(ReActAgent):
                 tool_choice={"type": "function", "function": {"name": "finish"}},
                 max_retries=20,
                 experiment_logger=self.experiment_logger,
-                **get_model_call_kwargs(self.model, self.enable_thinking),
+                **get_model_call_kwargs(self.model, self.enable_thinking,
+                                            getattr(self, 'thinking_config', None)),
             )
 
             # Extract answer from finish tool call if present
