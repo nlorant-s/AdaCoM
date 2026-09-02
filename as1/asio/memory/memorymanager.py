@@ -50,11 +50,26 @@ from .context_lock import (
     filter_modifications, format_msgs_with_locks, plan_lineage,
     stamp_produced_uids, snapshot, records_to_json, LOCK_PROMPT_ADDENDUM,
 )
+from .anthropic_validity import (
+    AnthropicValidityError, capture_thinking_snapshot, format_violations,
+    has_errors, validate_anthropic_history, violations_to_json,
+)
 
 # Custom exception for memory parsing errors
 class MemoryError(Exception):
     """Custom exception raised when memory parsing fails"""
     pass
+
+
+class ContextValidityError(MemoryError, AnthropicValidityError):
+    """The managed context would be rejected by the Messages API.
+
+    Subclasses MemoryError so it travels the existing rollout-failure path in
+    perform_modifications instead of being re-wrapped.
+    """
+
+    def __init__(self, violations):
+        AnthropicValidityError.__init__(self, violations)
 
 
 class DegenerateGenerationError(MemoryError):
@@ -476,6 +491,12 @@ class MemoryManager():
         self.lineage_log_path = params.get("lineage_log_path", None)
         self.lock_violations_last = []
         self.lineage_records = []
+        # Post-edit check that the managed context is still something the
+        # Messages API will accept: "off" | "log" | "raise". Default "log":
+        # debug_mode is on by default in this repo, so keying "raise" off it
+        # would abort training rollouts.
+        self.anthropic_validity_mode = params.get("anthropic_validity_mode", "log")
+        self.validity_violations_last = []
         self.compress_fre_min = params.get("compress_fre_min", None)
         self.compress_fre_max = params.get("compress_fre_max", None)
         self.max_response_tokens = params.get("max_response_tokens", 4096)
@@ -939,6 +960,12 @@ class MemoryManager():
             # --- lineage: snapshot before, plan uids ---
             _before_history = list(self._chat_history)
             _pre_snapshot = snapshot(_before_history)
+            # The in-flight thinking block as it stood before this round's
+            # edits — the reference the round-trip check compares against.
+            _thinking_snapshot = (
+                capture_thinking_snapshot(_before_history)
+                if self.agent_thinking_enabled else None
+            )
             _lineage_recs, _produced = plan_lineage(modifications, _before_history, step=self.round_number)
 
             delete_list = []
@@ -1130,6 +1157,27 @@ class MemoryManager():
             else:
                 self._save_debug_history([], hint=f"No modifications applied")
 
+            # --- round-trip validation against the Messages API rules ---
+            if self.agent_thinking_enabled and self.anthropic_validity_mode != "off":
+                self.validity_violations_last = validate_anthropic_history(
+                    self._chat_history,
+                    thinking_snapshot=_thinking_snapshot,
+                    thinking_enabled=True,
+                )
+                results["validity_violations"] = violations_to_json(self.validity_violations_last)
+                if self.validity_violations_last:
+                    message = (
+                        f"MEMORY_VALIDITY: round {self.round_number} produced an "
+                        f"API-invalid context: {format_violations(self.validity_violations_last)}"
+                    )
+                    if self.experiment_logger:
+                        self.experiment_logger.log_warning(message)
+                    if (self.anthropic_validity_mode == "raise"
+                            and has_errors(self.validity_violations_last)):
+                        raise ContextValidityError(self.validity_violations_last)
+            else:
+                self.validity_violations_last = []
+
             # --- lineage: stamp produced uids, persist ---
             stamp_produced_uids(self._chat_history, _before_history, _produced)
             self.lineage_records.extend(_lineage_recs)
@@ -1143,6 +1191,7 @@ class MemoryManager():
                             "post": snapshot(self._chat_history),
                             "modifications": modifications,
                             "lock_violations": results.get("lock_violations", []),
+                            "validity_violations": results.get("validity_violations", []),
                             "lineage": results["lineage"],
                         }, ensure_ascii=False) + "\n")
                 except Exception as _e:
