@@ -1,6 +1,8 @@
 # CLAUDE.md — AdaCoM fork (Sonnet 5 / Haiku 4.5 frozen agent)
 
-Read `docs/adacom_sonnet5_spec.md` before touching anything. §12–13 reconcile the paper with this codebase.
+Read `docs/ARCHITECTURE.md` first — what the code does now, and what is left to do.
+`docs/adacom_sonnet5_spec.md` is the research spec (§12–13 reconcile the paper with this codebase);
+`docs/anthropic_api_notes.md` holds the sourced API facts and the two upstream bugs we fixed.
 
 ## What this repo is
 Fork of github.com/luyi256/AdaCoM: Trinity-RFT + vendored AgentScope (`as1/`). An RL-trained

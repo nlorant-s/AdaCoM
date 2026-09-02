@@ -154,11 +154,23 @@ def _build_rollout_metric_summary(result: Dict[str, Any]) -> Dict[str, float]:
         "rollout/end_reason/context_manager_out_of_tokens/count"
     ]
 
+    metrics["rollout/end_reason/cost_budget_exceeded/count"] = (
+        1.0 if end_reason == "cost_budget_exceeded" else 0.0
+    )
+
+    # Per-rollout spend, so the dollar curve sits next to the reward curves.
+    cost = result.get("cost") or {}
+    if cost:
+        metrics["cost/rollout_usd"] = float(cost.get("cost_usd", 0.0))
+        metrics["cost/rollout_tokens"] = float(cost.get("total_tokens", 0.0))
+        metrics["cost/agent_calls"] = float(cost.get("calls", 0.0))
+
     for reason in (
         "insufficient_budget",
         "deferred_out_of_tokens",
         "repetition_penalty",
         "degenerate_generation",
+        "lock_violation",
     ):
         reason_rewards = [item for item in rewards if item.get("reason") == reason]
         metrics[f"reward/{reason}/count"] = float(len(reason_rewards))
