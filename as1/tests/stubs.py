@@ -250,6 +250,25 @@ class StubModel:
         return None
 
 
+class StubFormatter:
+    """FormatterBase stand-in: passes messages through as plain dicts."""
+
+    async def format(self, msgs=None, **_kwargs):
+        out = []
+        for m in msgs or []:
+            out.append({"role": getattr(m, "role", "user"),
+                        "content": getattr(m, "content", "")})
+        return out
+
+
+class StubResponse:
+    """ChatResponse stand-in with content blocks and usage."""
+
+    def __init__(self, text="", content=None, usage=None):
+        self.content = content if content is not None else [{"type": "text", "text": text}]
+        self.usage = usage
+
+
 class StubLogger:
     """ExperimentLogger stand-in that keeps everything in memory."""
 

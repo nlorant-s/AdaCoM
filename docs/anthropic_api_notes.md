@@ -65,3 +65,27 @@ planned for future models: re-check this before switching agent models.
 Not hardcoded anywhere. Pricing lives in a config file (see Task 6,
 `examples/dev/anthropic_pricing.yaml`); rate limits at
 `platform.claude.com/docs/en/api/rate-limits`.
+
+## Two upstream bugs the thinking path hit
+
+Both found by the mocked loop test (`as1/tests/test_smoke_loop.py`) and fixed in
+`memorymanager.py`. Neither could show up on the paper's setup, which ran
+OpenAI-compatible relays without thinking.
+
+1. **User-role tool results never closed a round.** `MemoryManager.add`
+   returned early for any `role == "user"` message. On the direct Anthropic API
+   tool results *must* be user-role (there is no system role in `messages`), so
+   the manager was never invoked at all. Now a user-role message returns early
+   only when it carries no `tool_result`.
+
+2. **`compress()` stripped thinking blocks.** Its regrouping pass rebuilt each
+   assistant message as `[text, tool_use]`, silently dropping `thinking`. The
+   in-flight block was destroyed every round, before the manager or the lock
+   ever saw the context — a guaranteed 400 on the next agent call. Thinking
+   blocks are now carried through and lead the message holding the first
+   `tool_use`.
+
+Related quirk, left alone: that same pass drops an assistant message that has
+neither `tool_use` nor `tool_result` blocks. Unreachable in the current loop
+(compression only runs on a round closed by a tool result), but worth knowing
+if the action space grows.

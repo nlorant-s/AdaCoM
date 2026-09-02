@@ -782,7 +782,13 @@ class MemoryManager():
         self.direct_add_chat_history(msg_to_record)
         self._extract_tool_use(msg_to_record)
         self.remove_solved_tools(msg_to_record)
-        if msg_to_record[0].role == "user":
+        # A user-role message ends the turn without closing a round -- unless it
+        # is carrying tool results. On the direct Anthropic API tool_result
+        # messages MUST be role "user" (the Messages API has no system role in
+        # `messages`), and those are exactly the messages that close a round and
+        # invoke the context manager. Relay/OpenAI paths send them as "system"
+        # and are unaffected by this condition.
+        if msg_to_record[0].role == "user" and not has_tool_result(msg_to_record):
             return
         for c in msg_to_record[0].content:
             if is_tool_use(c) and c.get("name", "") in ["generate_response", "finish"]:
@@ -1293,6 +1299,12 @@ class MemoryManager():
                 continue
             if isinstance(msg.content, list) and len(msg.content) > 0 and isinstance(msg.content[0], dict):
                 latest_text_block = None
+                # Thinking blocks must survive this regrouping: the Messages API
+                # requires the in-flight cycle's block to be passed back verbatim
+                # with its signature, and in manual thinking mode the assistant
+                # turn must begin with it. Without this they were dropped here,
+                # before the manager ever saw the context.
+                thinking_blocks = []
                 queue_start = len(tool_use_queue)
                 for item in msg.content:
                     if is_tool_use(item):
@@ -1310,10 +1322,16 @@ class MemoryManager():
                         tool_result_queue.append(copy.deepcopy(msg)) # always only one
                     elif item.get("type", "") == "text":
                         latest_text_block = copy.deepcopy(item)
+                    elif item.get("type", "") in ("thinking", "redacted_thinking"):
+                        thinking_blocks.append(copy.deepcopy(item))
                 # Attach remaining text block to first tool_use from this msg
                 if latest_text_block and queue_start < len(tool_use_queue):
                     first_tu = tool_use_queue[queue_start]
                     first_tu.content = [latest_text_block] + first_tu.content
+                # Thinking leads the message that carries the first tool_use.
+                if thinking_blocks and queue_start < len(tool_use_queue):
+                    first_tu = tool_use_queue[queue_start]
+                    first_tu.content = thinking_blocks + first_tu.content
         converted_orphan_tool_result_count = 0
         # Match by iterating tool_result, find corresponding tool_use; convert unmatched to text in-place
         for tr_msg in tool_result_queue:
