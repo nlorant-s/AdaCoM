@@ -1,0 +1,39 @@
+# Anthropic API prices, USD per million tokens.
+# Source: https://platform.claude.com/docs/en/about-claude/pricing
+# Checked: 2026-09-02. Prices change — re-check before a costed run; nothing
+# here is duplicated in code (CLAUDE.md invariant 4).
+#
+# cache_write_5m / cache_write_1h / cache_read are the prompt-caching rates.
+# agentscope's ChatUsage drops the cache breakdown, so with caching on the
+# guard's estimate is an upper bound (cached input priced as full input).
+#
+# Model ids are matched by prefix, so "claude-haiku-4-5" also covers
+# "claude-haiku-4-5-20251001".
+#
+# NOTE: Claude 4.7 and later use a tokenizer producing ~30% more tokens for the
+# same text, so a max_tokens cap tuned on Haiku 4.5 is not comparable there.
+models:
+  claude-haiku-4-5:
+    input: 1.0
+    output: 5.0
+    cache_write_5m: 1.25
+    cache_write_1h: 2.0
+    cache_read: 0.10
+  claude-sonnet-5:
+    input: 2.0
+    output: 10.0
+    cache_write_5m: 2.50
+    cache_write_1h: 4.0
+    cache_read: 0.20
+  claude-sonnet-4-6:
+    input: 3.0
+    output: 15.0
+    cache_write_5m: 3.75
+    cache_write_1h: 6.0
+    cache_read: 0.30
+  claude-opus-5:
+    input: 5.0
+    output: 25.0
+    cache_write_5m: 6.25
+    cache_write_1h: 10.0
+    cache_read: 0.50

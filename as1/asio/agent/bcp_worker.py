@@ -29,6 +29,7 @@ from asio.utils.retry import (
 from collections import defaultdict
 from asio.memory.utils import format_msgs
 from asio.agent.background_info import BCP_BACKGROUND_INFO, resolve_background_info
+from asio.utils.cost_guard import build_cost_tracker
 from asio.agent.memory_reward_utils import (
     build_deferred_out_of_tokens_rewards,
     build_insufficient_budget_reward,
@@ -158,6 +159,7 @@ class BCPWorker(ReActAgent):
         tokenizer: Optional[Any] = None,
         enable_thinking: bool = True,
         thinking_config: Optional[dict] = None,
+        cost_config: Optional[dict] = None,
         agent_temperature: float = 0,
         **kwargs: Any,
     ) -> None:
@@ -236,6 +238,19 @@ class BCPWorker(ReActAgent):
         self.compression_metrics_by_step = {}
         self.compression_repetition_stats_by_step = {}
         self.stop_on_no_tool_use = stop_on_no_tool_use
+
+        # Cost guard: per-rollout token / dollar budget for the frozen agent.
+        # Prices come from the file named in cost_config.pricing_path.
+        self.cost_config = cost_config or {}
+        self.cost_tracker = build_cost_tracker(
+            self.cost_config,
+            model_name=(getattr(model, "model_name", "") or ""),
+            experiment_logger=experiment_logger,
+            run_id=task_id,
+            batch_id=self.cost_config.get("batch_id"),
+        )
+        self.abort_rollout = False
+        self.abort_reason = None
 
         # Reward configuration with defaults
         self.reward_config = reward_config or {}
@@ -933,6 +948,8 @@ class BCPWorker(ReActAgent):
             self.compression_attempt_types = []
             self.context_manager_terminal = False
             self.context_manager_end_reason = None
+            self.abort_rollout = False
+            self.abort_reason = None
             self.recent_compression_steps = []
             self.compression_metrics_by_step = {}
             self.compression_repetition_stats_by_step = {}
@@ -965,7 +982,7 @@ class BCPWorker(ReActAgent):
                 self.current_tool_signatures = set()
                 # Get agent reasoning
                 response = await self._reasoning()
-                if self.context_manager_terminal:
+                if self.context_manager_terminal or self.abort_rollout:
                     break
                 
                 # Extract tool calls
@@ -1009,17 +1026,17 @@ class BCPWorker(ReActAgent):
                     
                     # Execute tool
                     await self._acting(tool_call)
-                    if self.context_manager_terminal:
+                    if self.context_manager_terminal or self.abort_rollout:
                         break
 
-                if self.context_manager_terminal:
+                if self.context_manager_terminal or self.abort_rollout:
                     break
                 
                 if finish_called:
                     break
             
             # If no final answer after max iterations, summarize
-            if final_answer is None and not self.context_manager_terminal:
+            if final_answer is None and not self.context_manager_terminal and not self.abort_rollout:
                 summary_response = await self._summarizing()
                 if hasattr(summary_response, 'content'):
                     if isinstance(summary_response.content, str):
@@ -1039,14 +1056,20 @@ class BCPWorker(ReActAgent):
                 "ground_truth": ground_truth,
                 "tool_calls": tool_calls,
                 "total_iterations": iteration + 1,
-                "success": final_answer is not None and not self.context_manager_terminal,
-                "end_reason": self.context_manager_end_reason,
+                "success": (final_answer is not None
+                            and not self.context_manager_terminal
+                            and not self.abort_rollout),
+                "end_reason": self.context_manager_end_reason or self.abort_reason,
                 "intermediate_rewards": self.intermediate_rewards,
                 "compression_attempt_types": self.compression_attempt_types,
                 "compression_metrics_by_step": self.compression_metrics_by_step,
                 "compression_repetition_stats_by_step": self.compression_repetition_stats_by_step,
             }
             
+            # Per-rollout spend: persisted and folded into the batch total.
+            if self.cost_tracker is not None:
+                results["cost"] = self.cost_tracker.finalize()
+
             # Log results
             if self.experiment_logger:
                 self.experiment_logger.log_debug(
@@ -1071,6 +1094,25 @@ class BCPWorker(ReActAgent):
                 "success": False,
                 "traceback": tb,
             }
+
+    def _record_agent_cost(self, response) -> None:
+        """Count one agent call against the run's token / dollar budget.
+
+        Hitting a cap aborts the rollout rather than raising: the partial
+        trajectory is still worth logging, and it is marked so the workflow can
+        tell it apart from a completed one.
+        """
+        if self.cost_tracker is None:
+            return
+        self.cost_tracker.record_usage(getattr(response, "usage", None))
+        if self.cost_tracker.over_budget() and not self.abort_rollout:
+            self.abort_rollout = True
+            self.abort_reason = "cost_budget_exceeded"
+            if self.experiment_logger:
+                self.experiment_logger.log_warning(
+                    f"COST_GUARD: budget exhausted, aborting rollout: "
+                    f"{json.dumps(self.cost_tracker.snapshot())}"
+                )
 
     def _record_lock_violation_penalty(self):
         """Turn dropped lock violations into a format penalty on this step.
@@ -1326,6 +1368,8 @@ class BCPWorker(ReActAgent):
                                         getattr(self, 'thinking_config', None))
             )
             
+            self._record_agent_cost(response)
+
             # Response shape (tool_call recovery, channel-marker cleanup,
             # thinking→text, tool_use id → UUID) is handled inside
             # retry_model_call via asio.utils.response_shape.
@@ -1483,6 +1527,8 @@ class BCPWorker(ReActAgent):
                                         getattr(self, 'thinking_config', None))
             )
             
+            self._record_agent_cost(response)
+
             # Convert response to Msg
             if hasattr(response, 'content'):
                 msg = Msg(self.name, response.content, "assistant")

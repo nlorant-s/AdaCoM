@@ -439,6 +439,16 @@ class BCPSimpleToolReActWorkflow(Workflow):
         except ImportError:
             pass
         self.agent_thinking_config = dict(agent_thinking_config) if agent_thinking_config else {}
+        # Per-rollout token / dollar cap for the frozen agent. Prices come
+        # from the file at agent_cost_config.pricing_path, never from code.
+        agent_cost_config = workflow_args.get("agent_cost_config", None)
+        try:
+            from omegaconf import OmegaConf, DictConfig
+            if isinstance(agent_cost_config, DictConfig):
+                agent_cost_config = OmegaConf.to_container(agent_cost_config, resolve=True)
+        except ImportError:
+            pass
+        self.agent_cost_config = dict(agent_cost_config) if agent_cost_config else {}
         self.agent_stream = bool(workflow_args.get("agent_stream", False))
         self.agent_temperature = float(workflow_args.get("agent_temperature", 0))
 
@@ -732,6 +742,8 @@ class BCPSimpleToolReActWorkflow(Workflow):
             tokenizer=self._cached_tokenizer,
             enable_thinking=self.agent_enable_thinking,
             thinking_config=self.agent_thinking_config,
+            cost_config={**self.agent_cost_config,
+                         'batch_id': self.task.batch_id} if self.agent_cost_config else None,
             **({'agent_temperature': self.agent_temperature} if self.sampled_agent_source == 'auxiliary' else {}),
         )
         timing_info['worker_creation'] = time.time() - worker_creation_start
